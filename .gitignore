@@ -1,0 +1,22 @@
+# Maven / IDE
+target/
+*.iml
+.idea/
+.vscode/
+.DS_Store
+
+# 运行时产物（仅匹配运行目录，避免误伤名为 data 的 Java 包）
+*.log
+/logs/
+/data/
+**/logs/
+forecast-task-server/data/
+forecast-gateway/data/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+forecast-python-engine/engine_data/

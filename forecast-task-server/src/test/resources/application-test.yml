@@ -1,0 +1,31 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:forecast-test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  flyway:
+    locations: classpath:db/migration,classpath:db/demo
+
+forecast:
+  demo:
+    enabled: true
+    history-days: 40
+  scheduler:
+    enabled: false
+  transfer:
+    # 小分片，验证分批传输
+    chunk-rows: 1000
+    parallelism: 3
+  engine:
+    poll-initial-interval: 20ms
+    poll-max-interval: 100ms
+    retry-initial-interval: 20ms
+  task:
+    step-retry-backoff: 50ms
+  callback:
+    allowed-hosts: [127.0.0.1]
+
+logging:
+  level:
+    com.forecast: info

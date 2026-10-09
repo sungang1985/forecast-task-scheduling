@@ -1,0 +1,38 @@
+# 开发环境：内嵌 H2（MySQL 兼容模式），自动加载演示表与演示数据，无需外部依赖
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/h2/forecast;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;AUTO_SERVER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 20
+  flyway:
+    locations: classpath:db/migration,classpath:db/demo
+  cloud:
+    # 未接入注册中心时，用 simple discovery 声明 Python 引擎实例（可配多个，轮询选择）；
+    # order 较大表示优先级低于 Nacos：开启 Nacos 且有实例时以 Nacos 为准
+    discovery:
+      client:
+        simple:
+          order: 100
+          instances:
+            forecast-python-engine:
+              - uri: ${ENGINE_URL:http://localhost:8000}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+forecast:
+  demo:
+    enabled: true
+    history-days: 120
+  callback:
+    allowed-hosts: [localhost, 127.0.0.1]
+
+logging:
+  level:
+    com.forecast: debug
+    com.forecast.task.mapper: info
+    com.alibaba.nacos: warn

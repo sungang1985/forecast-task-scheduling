@@ -1,0 +1,92 @@
+server:
+  port: ${SERVER_PORT:9000}
+  shutdown: graceful
+
+spring:
+  application:
+    name: forecast-gateway
+  profiles:
+    # standalone：不接注册中心，使用下方静态实例；接入 Nacos 时设置 SPRING_PROFILES_ACTIVE=nacos 并 NACOS_ENABLED=true
+    active: ${SPRING_PROFILES_ACTIVE:standalone}
+  cloud:
+    nacos:
+      discovery:
+        enabled: ${NACOS_ENABLED:false}
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:}
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 3000
+            response-timeout: 330s
+          default-filters:
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_UNIQUE
+          routes:
+            # 预测任务服务（lb:// 走 Spring Cloud LoadBalancer）
+            - id: forecast-task-server
+              uri: lb://forecast-task-server
+              predicates:
+                - Path=/api/v1/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: forecastTaskServer
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            # 透传下游接口文档
+            - id: forecast-task-server-docs
+              uri: lb://forecast-task-server
+              predicates:
+                - Path=/task/v3/api-docs/**
+              filters:
+                - StripPrefix=1
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      forecastTaskServer:
+        sliding-window-size: 50
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 20s
+        minimum-number-of-calls: 20
+  timelimiter:
+    instances:
+      forecastTaskServer:
+        # 需覆盖同步等待接口（waitSeconds 最大 300 秒）
+        timeout-duration: 330s
+
+gateway:
+  security:
+    enabled: ${API_KEY_ENABLED:false}
+    api-keys: ${API_KEYS:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway
+  endpoint:
+    health:
+      show-details: always
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:1.0}
+
+---
+# 独立运行（无注册中心）：静态声明下游实例。
+# 注意：Reactive LoadBalancer 会合并所有注册来源的实例，接入 Nacos 时不要激活本 profile，以免流量打到静态地址
+spring:
+  config:
+    activate:
+      on-profile: standalone
+  cloud:
+    discovery:
+      client:
+        simple:
+          instances:
+            forecast-task-server:
+              - uri: ${TASK_SERVER_URL:http://localhost:8080}

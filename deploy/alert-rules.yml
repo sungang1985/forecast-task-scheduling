@@ -1,0 +1,37 @@
+# 预测任务告警规则示例（配合 Alertmanager 推送到钉钉/企业微信/邮件）
+groups:
+  - name: forecast-task
+    rules:
+      - alert: ForecastTaskFailureRateHigh
+        expr: |
+          sum by (type) (increase(forecast_task_finished_total{status=~"FAILED|TIMEOUT"}[30m]))
+            / clamp_min(sum by (type) (increase(forecast_task_finished_total[30m])), 1) > 0.2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "预测任务失败率过高（{{ $labels.type }}）"
+          description: "近 30 分钟失败/超时比例超过 20%，请查看 /api/v1/monitor/overview 的 recentFailures"
+
+      - alert: ForecastTaskQueueBacklog
+        expr: max(forecast_task_queued) > 50
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "预测任务排队积压"
+          description: "排队任务数持续超过 50，考虑扩容 task-server 或 Python 引擎"
+
+      - alert: PythonEngineCircuitOpen
+        expr: max(resilience4j_circuitbreaker_state{name="pythonEngine", state="open"}) == 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Python 引擎熔断"
+          description: "调用 Python 引擎失败率过高，熔断器已打开"
+
+      - alert: ForecastTaskSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le, task_type, mode) (rate(forecast_task_seconds_bucket[1h]))) > 1800
+        for: 15m
+        labels: { severity: info }
+        annotations:
+          summary: "预测任务耗时偏高（{{ $labels.task_type }}/{{ $labels.mode }}）"

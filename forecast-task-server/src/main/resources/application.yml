@@ -1,0 +1,197 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 200
+    accept-count: 200
+
+spring:
+  application:
+    name: forecast-task-server
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  lifecycle:
+    timeout-per-shutdown-phase: 60s
+  jackson:
+    time-zone: ${TZ:Asia/Shanghai}
+    date-format: yyyy-MM-dd HH:mm:ss
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    # 演示脚本（可重复迁移）在关闭演示后不再存在，忽略其缺失，避免启动校验失败
+    ignore-migration-patterns: "repeatable:missing"
+  cloud:
+    nacos:
+      discovery:
+        enabled: ${NACOS_ENABLED:false}
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+      config:
+        enabled: ${NACOS_ENABLED:false}
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        file-extension: yaml
+        import-check:
+          enabled: false
+  config:
+    # 接入 Nacos 配置中心时生效（NACOS_ENABLED=true），配置变更热刷新
+    import: optional:nacos:${spring.application.name}.yaml?refreshEnabled=true
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-fetch-size: 500
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_id
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,loggers,threaddump,retries,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        forecast.task: true
+        forecast.task.step: true
+        http.server.requests: true
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:1.0}
+  info:
+    env:
+      enabled: true
+  health:
+    redis:
+      enabled: ${forecast.cache.redis-enabled}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+
+# ========================= 业务配置 =========================
+forecast:
+  executor:
+    core-pool-size: 8
+    max-pool-size: 16
+    queue-capacity: 200
+    transfer-pool-size: 8
+  engine:
+    # 直连地址（优先）；留空则通过注册中心按 service-id 选择实例
+    base-url: ${ENGINE_BASE_URL:}
+    # 与 Python 引擎 ENGINE_TOKEN 保持一致
+    token: ${ENGINE_TOKEN:}
+    service-id: forecast-python-engine
+    connect-timeout: 3s
+    read-timeout: 60s
+    poll-initial-interval: 500ms
+    poll-max-interval: 2s
+    retry-max-attempts: 3
+    retry-initial-interval: 500ms
+    cleanup-datasets: true
+    result-page-size: 5000
+  transfer:
+    chunk-rows: 20000
+    parallelism: 2
+    gzip: true
+  cache:
+    enabled: true
+    local-max-rows: 5000000
+    history-ttl: 12h
+    hot-ttl: 5m
+    hot-window: 3d
+    redis-enabled: ${CACHE_REDIS_ENABLED:false}
+  scheduler:
+    enabled: ${SCHEDULER_ENABLED:true}
+    pool-size: 4
+    refresh-interval: 30s
+    misfire-threshold: 1m
+  task:
+    default-timeout: 2h
+    max-wait-seconds: 300
+    heartbeat-interval: 30s
+    stale-timeout: 5m
+    step-max-attempts: 2
+    step-retry-backoff: 3s
+  security:
+    enabled: ${API_KEY_ENABLED:false}
+    api-keys: ${API_KEYS:}
+  callback:
+    allowed-hosts: []
+    max-attempts: 3
+    timeout: 5s
+
+  # 流程编排：模式 -> 有序步骤。新增流程时新增 ForecastStep 实现并在此引用
+  pipelines:
+    standard:
+      PREPROCESS: [LOAD_DATA, PREPROCESS]
+      TRAIN: [LOAD_DATA, PREPROCESS, TRAIN]
+      PREDICT: [LOAD_DATA, PREDICT, PERSIST_RESULT]
+      FULL: [LOAD_DATA, PREPROCESS, TRAIN, PREDICT, PERSIST_RESULT]
+
+  # 预测任务类型：数据源（不同表结构）、目标字段、默认窗口与算法
+  task-types:
+    LOAD:
+      display-name: 负荷预测
+      primary-source: load_curve_96
+      exogenous-sources:
+        - source: weather_hourly
+          join-on-key: true
+          cover-forecast-window: true
+      target-fields: [load]
+      frequency: 15min
+      default-algorithm: gbrt
+      default-history-days: 90
+      predict-lookback-days: 14
+      default-horizon-hours: 24
+      timeout: 1h
+      pipeline: standard
+      params:
+        lags: [96, 672]
+        outlier_method: iqr
+    PRICE:
+      display-name: 量价预测
+      primary-source: market_price_da
+      exogenous-sources:
+        - source: load_curve_96
+          join-on-key: false
+          cover-forecast-window: false
+        - source: weather_hourly
+          join-on-key: false
+          cover-forecast-window: true
+      target-fields: [price, volume]
+      frequency: 15min
+      default-algorithm: gbrt
+      default-history-days: 90
+      predict-lookback-days: 14
+      default-horizon-hours: 24
+      timeout: 1h
+      pipeline: standard
+      params:
+        lags: [96, 672]
+        outlier_method: quantile
