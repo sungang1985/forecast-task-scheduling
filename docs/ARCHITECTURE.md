@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     Client[业务系统 / 前端] -->|HTTP + X-API-Key| GW[forecast-gateway<br/>鉴权·路由·熔断·访问日志]
-    Other[其他微服务] -->|OpenFeign<br/>forecast-api| TS
+    Other[其他微服务] -->|HTTP Interface + RestClient<br/>forecast-api| TS
     GW -->|lb://forecast-task-server| TS
 
     subgraph TS[forecast-task-server（可多实例）]

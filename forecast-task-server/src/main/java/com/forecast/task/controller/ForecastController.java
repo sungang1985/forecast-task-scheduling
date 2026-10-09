@@ -75,7 +75,7 @@ public class ForecastController {
         return R.ok(taskService.submitAndWait(taskType, ForecastMode.FULL, request, waitSeconds));
     }
 
-    @Operation(summary = "按模式提交（通用入口，供 Feign 客户端使用）")
+    @Operation(summary = "按模式提交（通用入口，供 forecast-api 的 ForecastTaskClient 使用）")
     @PostMapping("/{taskType}/{mode}")
     public R<TaskSubmitResult> submit(@PathVariable String taskType, @PathVariable String mode,
                                       @RequestParam(defaultValue = "0") int waitSeconds,

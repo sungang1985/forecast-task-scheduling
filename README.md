@@ -24,7 +24,7 @@
 ```
 forecast-task-scheduling
 ├── forecast-common          公共模型：统一响应 R、错误码、业务异常、枚举、JSON 工具
-├── forecast-api             对外契约：请求/响应 DTO + OpenFeign 客户端（供其他微服务依赖）
+├── forecast-api             对外契约：请求/响应 DTO + 声明式 HTTP 客户端（Spring HTTP Interface，供其他微服务依赖）
 ├── forecast-task-server     预测任务服务（核心）
 │   ├── controller           对外接口：预测 / 任务 / 定时任务 / 数据源 / 缓存 / 模型 / 监控
 │   ├── pipeline             流程编排：ForecastStep 扩展点、PipelineRegistry、PipelineExecutor、各步骤实现
@@ -107,9 +107,27 @@ curl -X POST localhost:8080/api/v1/tasks/{taskId}/retry
 | 模型 | `GET /api/v1/models`、`POST /api/v1/models/{id}/activate` | 版本与指标、切换/回滚 |
 | 监控 | `GET /api/v1/monitor/overview`、`/actuator/prometheus`、`/actuator/health` | 总览、指标、健康 |
 
-其他微服务可依赖 `forecast-api` 并通过 `ForecastTaskClient`（OpenFeign）调用：引入 `spring-cloud-starter-openfeign`，
-`@EnableFeignClients(basePackageClasses = ForecastTaskClient.class)`；如需熔断降级，开启 `spring.cloud.openfeign.circuitbreaker.enabled=true`
-并将 `ForecastTaskClientFallbackFactory` 注册为 Bean。
+其他微服务依赖 `forecast-api` 后，通过 `ForecastTaskClient` 调用。它基于 Spring Framework 6 的 HTTP Interface + `RestClient` 实现，**不使用 Feign**；
+配合 `@LoadBalanced RestClient.Builder` 即可经注册中心按服务名负载均衡：
+
+```java
+@Bean
+@LoadBalanced
+RestClient.Builder loadBalancedRestClientBuilder() {
+    return RestClient.builder();
+}
+
+@Bean
+ForecastTaskClient forecastTaskClient(@LoadBalanced RestClient.Builder builder) {
+    // 第三个参数为 API Key（服务端未开启鉴权时可传 null）
+    return ForecastTaskClients.create(builder, "http://forecast-task-server", "your-api-key");
+}
+
+// 使用：业务错误不会抛异常，而是返回 code != 0 的 R
+R<TaskSubmitResult> r = forecastTaskClient.submit("LOAD", "full", 0, request);
+```
+
+调用方需引入 `spring-cloud-starter-loadbalancer` 与注册中心客户端（如 Nacos discovery）；不经注册中心时直接传入服务地址即可。需要熔断/重试时，在调用处用 Resilience4j 包装。
 
 ## 定时任务
 

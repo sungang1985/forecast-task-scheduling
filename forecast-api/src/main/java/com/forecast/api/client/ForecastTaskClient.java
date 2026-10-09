@@ -6,25 +6,21 @@ import com.forecast.api.dto.TaskDetail;
 import com.forecast.api.dto.TaskSubmitResult;
 import com.forecast.common.model.PageResult;
 import com.forecast.common.model.R;
-import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.service.annotation.GetExchange;
+import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.web.service.annotation.PostExchange;
 
 /**
- * 预测任务服务 OpenFeign 客户端。
+ * 预测任务服务声明式 HTTP 客户端（Spring Framework 6 HTTP Interface，基于 RestClient，不依赖 Feign）。
  * <p>
- * 其他微服务引入 forecast-api 与 spring-cloud-starter-openfeign 后，
- * 通过 {@code @EnableFeignClients(basePackageClasses = ForecastTaskClient.class)} 即可调用。
- * 需要熔断降级时开启 {@code spring.cloud.openfeign.circuitbreaker.enabled=true}，
- * 并将 {@link ForecastTaskClientFallbackFactory} 注册为 Spring Bean。
+ * 通过 {@link ForecastTaskClients#create} 创建实例；在 Spring Cloud 中配合 {@code @LoadBalanced RestClient.Builder}
+ * 与服务名（如 {@code http://forecast-task-server}）即可经注册中心负载均衡调用。
+ * 服务端返回的业务错误（4xx/5xx 且响应体为统一结构 {@link R}）不会抛出异常，而是以 {@code code != 0} 的 R 返回。
  */
-@FeignClient(name = "${forecast.client.service-id:forecast-task-server}",
-        contextId = "forecastTaskClient",
-        path = "/api/v1",
-        fallbackFactory = ForecastTaskClientFallbackFactory.class)
+@HttpExchange("/api/v1")
 public interface ForecastTaskClient {
 
     /**
@@ -34,20 +30,20 @@ public interface ForecastTaskClient {
      * @param mode        preprocess / train / predict / full
      * @param waitSeconds 同步等待秒数，0 表示异步立即返回
      */
-    @PostMapping("/forecast/{taskType}/{mode}")
+    @PostExchange("/forecast/{taskType}/{mode}")
     R<TaskSubmitResult> submit(@PathVariable("taskType") String taskType,
                                @PathVariable("mode") String mode,
-                               @RequestParam(value = "waitSeconds", defaultValue = "0") int waitSeconds,
+                               @RequestParam("waitSeconds") int waitSeconds,
                                @RequestBody ForecastTaskRequest request);
 
-    @GetMapping("/tasks/{taskId}")
+    @GetExchange("/tasks/{taskId}")
     R<TaskDetail> getTask(@PathVariable("taskId") String taskId);
 
-    @PostMapping("/tasks/{taskId}/cancel")
+    @PostExchange("/tasks/{taskId}/cancel")
     R<Boolean> cancel(@PathVariable("taskId") String taskId);
 
-    @GetMapping("/tasks/{taskId}/results")
+    @GetExchange("/tasks/{taskId}/results")
     R<PageResult<ForecastPointVO>> getResults(@PathVariable("taskId") String taskId,
-                                              @RequestParam(value = "page", defaultValue = "1") long page,
-                                              @RequestParam(value = "size", defaultValue = "500") long size);
+                                              @RequestParam("page") long page,
+                                              @RequestParam("size") long size);
 }

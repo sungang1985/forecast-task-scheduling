@@ -11,17 +11,18 @@
 
     <artifactId>forecast-api</artifactId>
     <name>forecast-api</name>
-    <description>对外接口契约：请求/响应 DTO 与 OpenFeign 客户端，供其他微服务依赖</description>
+    <description>对外接口契约：请求/响应 DTO 与声明式 HTTP 客户端（HTTP Interface），供其他微服务依赖</description>
 
     <dependencies>
         <dependency>
             <groupId>com.forecast</groupId>
             <artifactId>forecast-common</artifactId>
         </dependency>
-        <!-- 调用方自行引入 OpenFeign，这里仅编译期依赖 -->
+        <!-- 声明式客户端基于 Spring Framework 6 HTTP Interface + RestClient（不使用 Feign）；
+             调用方均为 Spring Web 应用，这里仅编译期依赖 -->
         <dependency>
-            <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-openfeign</artifactId>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
             <optional>true</optional>
         </dependency>
         <dependency>
