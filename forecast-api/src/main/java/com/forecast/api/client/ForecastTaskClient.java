@@ -17,8 +17,10 @@ import org.springframework.web.service.annotation.PostExchange;
  * 预测任务服务声明式 HTTP 客户端（Spring Framework 6 HTTP Interface，基于 RestClient，不依赖 Feign）。
  * <p>
  * 通过 {@link ForecastTaskClients#create} 创建实例；在 Spring Cloud 中配合 {@code @LoadBalanced RestClient.Builder}
- * 与服务名（如 {@code http://forecast-task-server}）即可经注册中心负载均衡调用。
- * 服务端返回的业务错误（4xx/5xx 且响应体为统一结构 {@link R}）不会抛出异常，而是以 {@code code != 0} 的 R 返回。
+ * 与服务名（如 {@code http://forecast-task-server}）即可经注册中心负载均衡调用（Bean 配置见 {@link ForecastTaskClients}）。
+ * <p>
+ * 服务端业务错误（响应体为统一结构 {@link R} 且 code != 0）不会抛出异常，而是直接返回该 R；
+ * 非 R 结构的错误响应抛 {@link ForecastClientException}，网络异常抛 {@code ResourceAccessException}。
  */
 @HttpExchange("/api/v1")
 public interface ForecastTaskClient {

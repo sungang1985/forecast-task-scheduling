@@ -19,6 +19,7 @@ public enum ErrorCode {
     CONFLICT(10409, "资源冲突", 409),
     TOO_MANY_REQUESTS(10429, "系统繁忙，请稍后重试", 429),
     INTERNAL_ERROR(10500, "系统内部错误", 500),
+    REMOTE_CALL_FAILED(10502, "远程服务调用失败", 502),
 
     TASK_NOT_FOUND(20404, "预测任务不存在", 404),
     TASK_TYPE_UNSUPPORTED(20400, "不支持的预测任务类型", 400),

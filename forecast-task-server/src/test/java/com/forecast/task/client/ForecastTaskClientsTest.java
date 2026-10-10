@@ -1,15 +1,18 @@
 package com.forecast.task.client;
 
+import com.forecast.api.client.ForecastClientException;
 import com.forecast.api.client.ForecastTaskClient;
 import com.forecast.api.client.ForecastTaskClients;
 import com.forecast.api.dto.ForecastTaskRequest;
 import com.forecast.api.dto.TaskSubmitResult;
 import com.forecast.common.exception.BizException;
+import com.forecast.common.exception.ErrorCode;
 import com.forecast.common.model.R;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 import java.net.InetSocketAddress;
@@ -50,6 +53,13 @@ class ForecastTaskClientsTest {
             ex.getResponseBody().write(body);
             ex.close();
         });
+        json(500, "/api/v1/tasks/BOOT-ERROR", "application/json",
+                "{\"timestamp\":\"2026-10-09T15:01:51.437+00:00\",\"path\":\"/api/v1/tasks/FT1\",\"status\":500,"
+                        + "\"error\":\"Internal Server Error\",\"requestId\":\"d790e856-2\"}");
+        json(503, "/api/v1/tasks/NO-CODE", "application/json", "{\"message\":\"no healthy upstream\"}");
+        json(502, "/api/v1/tasks/EMPTY", "application/json", "");
+        json(500, "/api/v1/tasks/ZERO-CODE", "application/json", "{\"code\":0,\"message\":\"success\"}");
+        json(400, "/api/v1/tasks/STRING-CODE", "application/json", "{\"code\":\"10400\",\"message\":\"x\"}");
         server.createContext("/api/v1/tasks/GATEWAY", ex -> {
             byte[] body = "<html>Bad Gateway</html>".getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "text/html");
@@ -58,6 +68,18 @@ class ForecastTaskClientsTest {
             ex.close();
         });
         server.start();
+    }
+
+    private void json(int status, String path, String contentType, String payload) {
+        server.createContext(path, ex -> {
+            byte[] body = payload.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", contentType);
+            ex.sendResponseHeaders(status, body.length == 0 ? -1 : body.length);
+            if (body.length > 0) {
+                ex.getResponseBody().write(body);
+            }
+            ex.close();
+        });
     }
 
     @AfterEach
@@ -99,6 +121,46 @@ class ForecastTaskClientsTest {
         assertThatThrownBy(() -> client.getTask("GATEWAY"))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("HTTP 502");
+    }
+
+    /**
+     * 非服务端统一结构的 JSON 错误（网关/代理/Boot 默认错误页、空体、code 缺失或为 0、code 非数字）
+     * 一律抛 ForecastClientException 并保留 HTTP 状态，绝不能被当成成功或返回 null。
+     */
+    @Test
+    void jsonErrorsThatAreNotBusinessResultsThrowWithStatus() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
+        Map<String, Integer> cases = Map.of("BOOT-ERROR", 500, "NO-CODE", 503, "EMPTY", 502,
+                "ZERO-CODE", 500, "STRING-CODE", 400);
+        cases.forEach((path, status) -> assertThatThrownBy(() -> client.getTask(path))
+                .as(path)
+                .isInstanceOfSatisfying(ForecastClientException.class, e -> {
+                    assertThat(e.getHttpStatus()).isEqualTo(status);
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.REMOTE_CALL_FAILED);
+                }));
+    }
+
+    @Test
+    void connectionFailuresSurfaceAsResourceAccessException() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), "http://127.0.0.1:1");
+        assertThatThrownBy(() -> client.getTask("FT1")).isInstanceOf(ResourceAccessException.class);
+    }
+
+    /**
+     * 与负载均衡等 URI 改写类拦截器共存：外层拦截器先改写地址，业务错误拦截器仍生效。
+     */
+    @Test
+    void worksBehindUriRewritingInterceptor() {
+        RestClient.Builder lbLike = RestClient.builder().requestInterceptor((request, body, execution) ->
+                execution.execute(new org.springframework.http.client.support.HttpRequestWrapper(request) {
+                    @Override
+                    public java.net.URI getURI() {
+                        return java.net.URI.create(request.getURI().toString().replace("http://forecast-task-server", baseUrl()));
+                    }
+                }, body));
+        ForecastTaskClient client = ForecastTaskClients.create(lbLike, "http://forecast-task-server");
+        assertThat(client.getTask("LIMITED").getCode()).isEqualTo(10429);
+        assertThatThrownBy(() -> client.getTask("NO-CODE")).isInstanceOf(ForecastClientException.class);
     }
 
     @Test

@@ -107,14 +107,27 @@ curl -X POST localhost:8080/api/v1/tasks/{taskId}/retry
 | 模型 | `GET /api/v1/models`、`POST /api/v1/models/{id}/activate` | 版本与指标、切换/回滚 |
 | 监控 | `GET /api/v1/monitor/overview`、`/actuator/prometheus`、`/actuator/health` | 总览、指标、健康 |
 
-其他微服务依赖 `forecast-api` 后，通过 `ForecastTaskClient` 调用。它基于 Spring Framework 6 的 HTTP Interface + `RestClient` 实现，**不使用 Feign**；
-配合 `@LoadBalanced RestClient.Builder` 即可经注册中心按服务名负载均衡：
+### 其他微服务调用（forecast-api）
+
+其他微服务依赖 `forecast-api` 后，通过 `ForecastTaskClient` 调用。它基于 Spring Framework 6 的 HTTP Interface + `RestClient` 实现，**不使用 Feign**。
+按服务名经注册中心负载均衡调用时，调用方需引入 `spring-cloud-starter-loadbalancer` 与注册中心客户端（如 Nacos discovery），并声明两个 builder：
 
 ```java
+// 1) 保留 Boot 默认的 RestClient.Builder：一旦声明任何 RestClient.Builder Bean，Boot 的自动配置就会失效，
+//    因此显式声明一个 @Primary 的，供应用中其他 RestClient 使用（不做负载均衡）
+@Bean
+@Primary
+@Scope("prototype")
+RestClient.Builder restClientBuilder(RestClientBuilderConfigurer configurer) {
+    return configurer.configure(RestClient.builder());
+}
+
+// 2) 负载均衡专用 builder：同样经 configurer 配置，保留链路追踪、Jackson 等 Boot 定制
 @Bean
 @LoadBalanced
-RestClient.Builder loadBalancedRestClientBuilder() {
-    return RestClient.builder();
+@Scope("prototype")
+RestClient.Builder loadBalancedRestClientBuilder(RestClientBuilderConfigurer configurer) {
+    return configurer.configure(RestClient.builder());
 }
 
 @Bean
@@ -122,12 +135,28 @@ ForecastTaskClient forecastTaskClient(@LoadBalanced RestClient.Builder builder) 
     // 第三个参数为 API Key（服务端未开启鉴权时可传 null）
     return ForecastTaskClients.create(builder, "http://forecast-task-server", "your-api-key");
 }
-
-// 使用：业务错误不会抛异常，而是返回 code != 0 的 R
-R<TaskSubmitResult> r = forecastTaskClient.submit("LOAD", "full", 0, request);
 ```
 
-调用方需引入 `spring-cloud-starter-loadbalancer` 与注册中心客户端（如 Nacos discovery）；不经注册中心时直接传入服务地址即可。需要熔断/重试时，在调用处用 Resilience4j 包装。
+不经注册中心（直连服务地址或网关地址）时，注入普通的 `RestClient.Builder`（Boot 自动配置的或上面的 `@Primary` 那个），传入实际地址即可：
+`ForecastTaskClients.create(builder, "http://forecast-gateway:9000", "your-api-key")`。注意不要把直连地址交给 `@LoadBalanced` builder，它会把主机名当作服务名解析。
+
+返回与异常约定：
+
+| 情况 | 结果 |
+|---|---|
+| 调用成功 | 返回 `code == 0` 的 `R` |
+| 服务端业务错误（参数错误、任务不存在、未通过鉴权、队列已满等，响应体为统一结构 `R`） | **不抛异常**，返回 `code != 0` 的 `R` |
+| 其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等） | 抛 `ForecastClientException`（`getHttpStatus()` 为 HTTP 状态码，错误码 `REMOTE_CALL_FAILED`） |
+| 网络异常（连接失败、超时） | 抛 Spring 的 `ResourceAccessException` |
+
+```java
+R<TaskSubmitResult> r = forecastTaskClient.submit("LOAD", "full", 0, request);
+if (!r.isSuccess()) {
+    log.warn("提交失败 code={} message={}", r.getCode(), r.getMessage());
+}
+```
+
+需要熔断/重试时，在调用处用 Resilience4j 包装。
 
 ## 定时任务
 
