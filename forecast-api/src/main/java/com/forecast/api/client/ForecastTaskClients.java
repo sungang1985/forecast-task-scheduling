@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.forecast.common.constant.TraceHeaders;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
@@ -50,16 +51,23 @@ import java.nio.charset.StandardCharsets;
  * <p>
  * 返回与异常约定：
  * <ul>
- *     <li>服务端业务错误（统一结构 R，code != 0，如参数错误、任务不存在、未通过鉴权）：<b>不抛异常</b>，返回该 R；</li>
- *     <li>其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等）：抛 {@link ForecastClientException}，携带 HTTP 状态码；</li>
- *     <li>网络异常（连接失败、超时）：抛 Spring 的 {@code ResourceAccessException}。</li>
+ *     <li>服务端业务错误（统一结构 R，code != 0，如参数错误、任务不存在、未通过鉴权）：<b>不抛异常</b>，返回该 R。
+ *     即使传入的 builder 自带错误状态处理器也是如此（客户端 http.client.requests 指标中这类响应记为 200，真实状态见服务端指标）；</li>
+ *     <li>其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等）：抛 {@link ForecastClientException}（携带 HTTP 状态码）；
+ *     若传入的 builder 已配置错误状态处理器，则由该处理器优先处理；</li>
+ *     <li>网络异常（连接失败、超时、读取响应中断）以及按服务名调用但注册中心无可用实例：抛 Spring 的 {@code ResourceAccessException}。</li>
  * </ul>
  * 需要熔断/重试时，可在调用处使用 Resilience4j 包装。
  */
 public final class ForecastTaskClients {
 
+    /** 业务错误响应改写为 200 后，原始 HTTP 状态码放在该响应头中，便于排查 */
+    public static final String ORIGINAL_STATUS_HEADER = "X-Forecast-Original-Status";
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_BODY_SNIPPET = 500;
+    /** Spring Cloud LoadBalancer 在无可用实例时抛出的 IllegalStateException 消息前缀 */
+    private static final String NO_INSTANCES_PREFIX = "No instances available";
 
     private ForecastTaskClients() {
     }
@@ -72,9 +80,17 @@ public final class ForecastTaskClients {
     public static ForecastTaskClient create(RestClient.Builder builder, String baseUrl, String apiKey) {
         RestClient.Builder configured = builder.clone()
                 .baseUrl(baseUrl)
+                // 放在拦截器链首位（负载均衡拦截器之前），把“注册中心无可用实例”统一为 ResourceAccessException
+                .requestInterceptors(interceptors -> interceptors.add(0, new NoInstanceInterceptor()))
                 .requestInterceptor(new BusinessErrorInterceptor())
-                // 能到达这里的错误响应均已由拦截器确认是服务端统一结构 R：不抛异常，交给调用方按 code 判断
+                // 能到达这里的错误响应均不是服务端统一结构 R（业务错误已被拦截器转换），一律视为调用失败
                 .defaultStatusHandler(HttpStatusCode::isError, (request, response) -> {
+                    String body;
+                    try (InputStream in = response.getBody()) {
+                        body = new String(StreamUtils.copyToByteArray(in), StandardCharsets.UTF_8);
+                    }
+                    throw new ForecastClientException(response.getStatusCode().value(), String.valueOf(request.getURI()),
+                            body.length() > MAX_BODY_SNIPPET ? body.substring(0, MAX_BODY_SNIPPET) : body);
                 });
         if (apiKey != null && !apiKey.isBlank()) {
             configured.defaultHeader(TraceHeaders.API_KEY, apiKey);
@@ -95,9 +111,25 @@ public final class ForecastTaskClients {
                 .createClient(ForecastTaskClient.class);
     }
 
+    static boolean isBusinessError(byte[] content) {
+        if (content.length == 0) {
+            return false;
+        }
+        try {
+            JsonNode node = MAPPER.readTree(content);
+            if (node == null || !node.isObject()) {
+                return false;
+            }
+            JsonNode code = node.get("code");
+            return code != null && code.isIntegralNumber() && code.canConvertToInt() && code.intValue() != 0;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     /**
-     * 只有响应体确实是服务端统一结构 R（JSON 对象且 code 为非 0 整数）的错误响应才放行；
-     * 放行时缓存响应体，便于后续消息转换器再次读取。
+     * 缓存错误响应的响应体：服务端统一结构 R 的业务错误改写为 200（原状态码放入 {@link #ORIGINAL_STATUS_HEADER}），
+     * 使其不受任何错误状态处理器影响、按 R 正常解码；其他错误响应保留原状态码，交给状态处理器。
      */
     static final class BusinessErrorInterceptor implements ClientHttpRequestInterceptor {
 
@@ -113,29 +145,36 @@ public final class ForecastTaskClients {
             try (InputStream in = response.getBody()) {
                 content = StreamUtils.copyToByteArray(in);
             } catch (IOException e) {
+                // 读取响应体中断属于网络异常：关闭后原样抛出，由 RestClient 包装为 ResourceAccessException
                 response.close();
-                throw new ForecastClientException(status.value(), String.valueOf(request.getURI()), null);
+                throw e;
             }
             if (isBusinessError(content)) {
-                return new BufferedResponse(response, content);
+                HttpHeaders headers = new HttpHeaders();
+                headers.putAll(response.getHeaders());
+                headers.set(ORIGINAL_STATUS_HEADER, String.valueOf(status.value()));
+                return new BufferedResponse(response, HttpStatus.OK, headers, content);
             }
-            response.close();
-            String text = new String(content, StandardCharsets.UTF_8);
-            throw new ForecastClientException(status.value(), String.valueOf(request.getURI()),
-                    text.length() > MAX_BODY_SNIPPET ? text.substring(0, MAX_BODY_SNIPPET) : text);
+            return new BufferedResponse(response, status, response.getHeaders(), content);
         }
+    }
 
-        static boolean isBusinessError(byte[] content) {
-            if (content.length == 0) {
-                return false;
-            }
+    /**
+     * Spring Cloud LoadBalancer 无可用实例时抛 IllegalStateException，RestClient 不会包装它；
+     * 转为 IOException 后由 RestClient 统一包装为 ResourceAccessException，与其他“服务不可达”情形一致。
+     */
+    static final class NoInstanceInterceptor implements ClientHttpRequestInterceptor {
+
+        @Override
+        public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution)
+                throws IOException {
             try {
-                JsonNode node = MAPPER.readTree(content);
-                JsonNode code = node == null ? null : node.get("code");
-                return node != null && node.isObject() && code != null && code.canConvertToInt() && code.isIntegralNumber()
-                        && code.intValue() != 0;
-            } catch (IOException e) {
-                return false;
+                return execution.execute(request, body);
+            } catch (IllegalStateException e) {
+                if (e.getMessage() != null && e.getMessage().startsWith(NO_INSTANCES_PREFIX)) {
+                    throw new IOException("注册中心中没有可用的预测任务服务实例: " + e.getMessage(), e);
+                }
+                throw e;
             }
         }
     }
@@ -146,26 +185,30 @@ public final class ForecastTaskClients {
     static final class BufferedResponse implements ClientHttpResponse {
 
         private final ClientHttpResponse delegate;
+        private final HttpStatusCode status;
+        private final HttpHeaders headers;
         private final byte[] body;
 
-        BufferedResponse(ClientHttpResponse delegate, byte[] body) {
+        BufferedResponse(ClientHttpResponse delegate, HttpStatusCode status, HttpHeaders headers, byte[] body) {
             this.delegate = delegate;
+            this.status = status;
+            this.headers = headers;
             this.body = body;
         }
 
         @Override
-        public HttpStatusCode getStatusCode() throws IOException {
-            return delegate.getStatusCode();
+        public HttpStatusCode getStatusCode() {
+            return status;
         }
 
         @Override
-        public String getStatusText() throws IOException {
-            return delegate.getStatusText();
+        public String getStatusText() {
+            return status instanceof HttpStatus known ? known.getReasonPhrase() : "";
         }
 
         @Override
         public HttpHeaders getHeaders() {
-            return delegate.getHeaders();
+            return headers;
         }
 
         @Override

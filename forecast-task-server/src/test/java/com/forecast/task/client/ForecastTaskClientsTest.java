@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
@@ -60,6 +61,14 @@ class ForecastTaskClientsTest {
         json(502, "/api/v1/tasks/EMPTY", "application/json", "");
         json(500, "/api/v1/tasks/ZERO-CODE", "application/json", "{\"code\":0,\"message\":\"success\"}");
         json(400, "/api/v1/tasks/STRING-CODE", "application/json", "{\"code\":\"10400\",\"message\":\"x\"}");
+        server.createContext("/api/v1/tasks/TRUNCATED", ex -> {
+            // 声明 100 字节却只写 10 字节后断开：模拟读取错误响应体时连接中断
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(500, 100);
+            ex.getResponseBody().write("{\"code\":10".getBytes(StandardCharsets.UTF_8));
+            ex.getResponseBody().flush();
+            ex.close();
+        });
         server.createContext("/api/v1/tasks/GATEWAY", ex -> {
             byte[] body = "<html>Bad Gateway</html>".getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "text/html");
@@ -138,6 +147,85 @@ class ForecastTaskClientsTest {
                     assertThat(e.getHttpStatus()).isEqualTo(status);
                     assertThat(e.getErrorCode()).isEqualTo(ErrorCode.REMOTE_CALL_FAILED);
                 }));
+    }
+
+    @Test
+    void exceptionMessageDoesNotLeakAddressOrBody() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
+        assertThatThrownBy(() -> client.getTask("NO-CODE"))
+                .isInstanceOfSatisfying(ForecastClientException.class, e -> {
+                    assertThat(e.getMessage()).isEqualTo("预测任务服务调用失败: HTTP 503");
+                    assertThat(e.getUri()).endsWith("/api/v1/tasks/NO-CODE");
+                    assertThat(e.getResponseBody()).contains("no healthy upstream");
+                });
+    }
+
+    /**
+     * 调用方 builder 自带错误状态处理器（如 RestClientCustomizer 统一添加）时，业务错误仍以 R 返回；
+     * 非 R 错误由调用方处理器优先处理。
+     */
+    @Test
+    void consumerErrorHandlerDoesNotBreakBusinessErrors() {
+        RestClient.Builder consumer = RestClient.builder().defaultStatusHandler(HttpStatusCode::isError, (req, res) -> {
+            throw new IllegalArgumentException("consumer handler " + res.getStatusCode().value());
+        });
+        ForecastTaskClient client = ForecastTaskClients.create(consumer, baseUrl());
+        assertThat(client.getTask("LIMITED").getCode()).isEqualTo(10429);
+        assertThatThrownBy(() -> client.getTask("NO-CODE"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("consumer handler 503");
+    }
+
+    @Test
+    void noInstancesFromLoadBalancerBecomesResourceAccessException() {
+        RestClient.Builder noInstances = RestClient.builder().requestInterceptor((request, body, execution) -> {
+            throw new IllegalStateException("No instances available for forecast-task-server");
+        });
+        assertThatThrownBy(() -> ForecastTaskClients.create(noInstances, "http://forecast-task-server").getTask("FT1"))
+                .isInstanceOf(ResourceAccessException.class)
+                .hasMessageContaining("No instances available for forecast-task-server")
+                .hasRootCauseInstanceOf(IllegalStateException.class);
+
+        // 其他 IllegalStateException（非负载均衡无实例）不做转换
+        RestClient.Builder otherBug = RestClient.builder().requestInterceptor((request, body, execution) -> {
+            throw new IllegalStateException("boom");
+        });
+        assertThatThrownBy(() -> ForecastTaskClients.create(otherBug, baseUrl()).getTask("FT1"))
+                .isInstanceOf(IllegalStateException.class).hasMessage("boom");
+    }
+
+    @Test
+    void ioErrorWhileReadingErrorBodyIsResourceAccessException() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
+        assertThatThrownBy(() -> client.getTask("TRUNCATED")).isInstanceOf(ResourceAccessException.class);
+    }
+
+    /**
+     * 可观测性：非 R 错误在 http.client.requests 中保留真实状态码；业务错误按改写后的 200 记录，原状态码保留在响应头。
+     */
+    @Test
+    void observationKeepsRealStatusForNonBusinessErrors() {
+        java.util.List<Integer> statuses = new java.util.concurrent.CopyOnWriteArrayList<>();
+        io.micrometer.observation.ObservationRegistry registry = io.micrometer.observation.ObservationRegistry.create();
+        registry.observationConfig().observationHandler(
+                new io.micrometer.observation.ObservationHandler<org.springframework.http.client.observation.ClientRequestObservationContext>() {
+                    @Override
+                    public void onStop(org.springframework.http.client.observation.ClientRequestObservationContext context) {
+                        try {
+                            statuses.add(context.getResponse() == null ? -1 : context.getResponse().getStatusCode().value());
+                        } catch (java.io.IOException e) {
+                            statuses.add(-2);
+                        }
+                    }
+
+                    @Override
+                    public boolean supportsContext(io.micrometer.observation.Observation.Context context) {
+                        return context instanceof org.springframework.http.client.observation.ClientRequestObservationContext;
+                    }
+                });
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder().observationRegistry(registry), baseUrl());
+        assertThatThrownBy(() -> client.getTask("NO-CODE")).isInstanceOf(ForecastClientException.class);
+        assertThat(client.getTask("LIMITED").getCode()).isEqualTo(10429);
+        assertThat(statuses).containsExactly(503, 200);
     }
 
     @Test

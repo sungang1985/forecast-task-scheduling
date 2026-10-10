@@ -145,9 +145,11 @@ ForecastTaskClient forecastTaskClient(@LoadBalanced RestClient.Builder builder) 
 | 情况 | 结果 |
 |---|---|
 | 调用成功 | 返回 `code == 0` 的 `R` |
-| 服务端业务错误（参数错误、任务不存在、未通过鉴权、队列已满等，响应体为统一结构 `R`） | **不抛异常**，返回 `code != 0` 的 `R` |
-| 其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等） | 抛 `ForecastClientException`（`getHttpStatus()` 为 HTTP 状态码，错误码 `REMOTE_CALL_FAILED`） |
-| 网络异常（连接失败、超时） | 抛 Spring 的 `ResourceAccessException` |
+| 服务端业务错误（参数错误、任务不存在、未通过鉴权、队列已满等，响应体为统一结构 `R`） | **不抛异常**，返回 `code != 0` 的 `R`；即使传入的 builder 自带错误状态处理器（如 `RestClientCustomizer` 统一添加的）也是如此 |
+| 其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等） | 抛 `ForecastClientException`：`getHttpStatus()` 为 HTTP 状态码，错误码 `REMOTE_CALL_FAILED`；`getMessage()` 只含状态码，请求地址与响应体片段通过 `getUri()`/`getResponseBody()` 获取，仅用于日志。若传入的 builder 已配置错误状态处理器，则由该处理器优先处理 |
+| 网络异常（连接失败、超时、读取响应中断）、按服务名调用但注册中心无可用实例 | 抛 Spring 的 `ResourceAccessException` |
+
+可观测性说明：业务错误在客户端被视为一次正常的 `R` 返回，`http.client.requests` 指标中记为 200（原始状态码见响应头 `X-Forecast-Original-Status` 与服务端指标）；其他错误响应保留真实状态码。
 
 ```java
 R<TaskSubmitResult> r = forecastTaskClient.submit("LOAD", "full", 0, request);
