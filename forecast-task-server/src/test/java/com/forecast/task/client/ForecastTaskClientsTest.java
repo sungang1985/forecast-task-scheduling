@@ -61,11 +61,23 @@ class ForecastTaskClientsTest {
         json(502, "/api/v1/tasks/EMPTY", "application/json", "");
         json(500, "/api/v1/tasks/ZERO-CODE", "application/json", "{\"code\":0,\"message\":\"success\"}");
         json(400, "/api/v1/tasks/STRING-CODE", "application/json", "{\"code\":\"10400\",\"message\":\"x\"}");
+        // 内容像 R 但不是 JSON 响应（代理返回的纯文本、缺失 Content-Type）：不能按 R 解码
+        json(503, "/api/v1/tasks/TEXT-R", "text/plain", "{\"code\":10500,\"message\":\"x\"}");
+        json(500, "/api/v1/tasks/NO-TYPE-R", null, "{\"code\":10500,\"message\":\"x\"}");
+        json(503, "/api/v1/tasks/PROBLEM-R", "application/problem+json", "{\"code\":40503,\"message\":\"引擎不可用\"}");
         server.createContext("/api/v1/tasks/TRUNCATED", ex -> {
             // 声明 100 字节却只写 10 字节后断开：模拟读取错误响应体时连接中断
             ex.getResponseHeaders().set("Content-Type", "application/json");
             ex.sendResponseHeaders(500, 100);
             ex.getResponseBody().write("{\"code\":10".getBytes(StandardCharsets.UTF_8));
+            ex.getResponseBody().flush();
+            ex.close();
+        });
+        server.createContext("/api/v1/tasks/TRUNCATED-OK", ex -> {
+            // 成功响应同样在读取响应体时中断
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, 100);
+            ex.getResponseBody().write("{\"code\":0,".getBytes(StandardCharsets.UTF_8));
             ex.getResponseBody().flush();
             ex.close();
         });
@@ -82,7 +94,9 @@ class ForecastTaskClientsTest {
     private void json(int status, String path, String contentType, String payload) {
         server.createContext(path, ex -> {
             byte[] body = payload.getBytes(StandardCharsets.UTF_8);
-            ex.getResponseHeaders().set("Content-Type", contentType);
+            if (contentType != null) {
+                ex.getResponseHeaders().set("Content-Type", contentType);
+            }
             ex.sendResponseHeaders(status, body.length == 0 ? -1 : body.length);
             if (body.length > 0) {
                 ex.getResponseBody().write(body);
@@ -133,20 +147,45 @@ class ForecastTaskClientsTest {
     }
 
     /**
-     * 非服务端统一结构的 JSON 错误（网关/代理/Boot 默认错误页、空体、code 缺失或为 0、code 非数字）
-     * 一律抛 ForecastClientException 并保留 HTTP 状态，绝不能被当成成功或返回 null。
+     * 非服务端统一结构的错误（网关/代理/Boot 默认错误页、空体、code 缺失或为 0、code 非数字、非 JSON 响应体）
+     * 一律抛 ForecastClientException 并保留 HTTP 状态，绝不能被当成成功、返回 null 或抛解码异常。
      */
     @Test
-    void jsonErrorsThatAreNotBusinessResultsThrowWithStatus() {
+    void errorsThatAreNotBusinessResultsThrowWithStatus() {
         ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
         Map<String, Integer> cases = Map.of("BOOT-ERROR", 500, "NO-CODE", 503, "EMPTY", 502,
-                "ZERO-CODE", 500, "STRING-CODE", 400);
+                "ZERO-CODE", 500, "STRING-CODE", 400, "TEXT-R", 503, "NO-TYPE-R", 500);
         cases.forEach((path, status) -> assertThatThrownBy(() -> client.getTask(path))
                 .as(path)
                 .isInstanceOfSatisfying(ForecastClientException.class, e -> {
                     assertThat(e.getHttpStatus()).isEqualTo(status);
                     assertThat(e.getErrorCode()).isEqualTo(ErrorCode.REMOTE_CALL_FAILED);
                 }));
+    }
+
+    /**
+     * application/*+json 的 R 同样按业务错误返回；5xx 类错误码可用 isServerError 识别，用于熔断计数。
+     */
+    @Test
+    void jsonSuffixBusinessErrorIsReturnedAndClassifiedAsServerError() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
+        R<?> engineDown = client.getTask("PROBLEM-R");
+        assertThat(engineDown.getCode()).isEqualTo(ErrorCode.ENGINE_UNAVAILABLE.getCode());
+        assertThat(ForecastTaskClients.isServerError(engineDown)).isTrue();
+        assertThat(ForecastTaskClients.isServerError(client.getTask("LIMITED"))).isFalse();
+    }
+
+    @Test
+    void isServerErrorClassifiesByErrorCodeHttpStatus() {
+        assertThat(ForecastTaskClients.isServerError(R.ok())).isFalse();
+        assertThat(ForecastTaskClients.isServerError(null)).isFalse();
+        assertThat(ForecastTaskClients.isServerError(R.fail(ErrorCode.TASK_NOT_FOUND))).isFalse();
+        assertThat(ForecastTaskClients.isServerError(R.fail(ErrorCode.TOO_MANY_REQUESTS))).isFalse();
+        assertThat(ForecastTaskClients.isServerError(R.fail(ErrorCode.INTERNAL_ERROR))).isTrue();
+        assertThat(ForecastTaskClients.isServerError(R.fail(ErrorCode.TASK_TIMEOUT))).isTrue();
+        assertThat(ForecastTaskClients.isServerError(R.fail(ErrorCode.ENGINE_CALL_FAILED))).isTrue();
+        // 未定义的错误码按服务端故障处理
+        assertThat(ForecastTaskClients.isServerError(R.fail(99999, "new"))).isTrue();
     }
 
     @Test
@@ -185,18 +224,41 @@ class ForecastTaskClientsTest {
                 .hasMessageContaining("No instances available for forecast-task-server")
                 .hasRootCauseInstanceOf(IllegalStateException.class);
 
-        // 其他 IllegalStateException（非负载均衡无实例）不做转换
+        // 引入 spring-retry 后由 RetryLoadBalancerInterceptor 调用，BlockingLoadBalancerClient 抛 IllegalArgumentException
+        RestClient.Builder retryNoInstances = RestClient.builder().requestInterceptor((request, body, execution) -> {
+            throw new IllegalArgumentException("Service Instance cannot be null, serviceId: forecast-task-server");
+        });
+        assertThatThrownBy(() -> ForecastTaskClients.create(retryNoInstances, "http://forecast-task-server").getTask("FT1"))
+                .isInstanceOf(ResourceAccessException.class)
+                .hasMessageContaining("Service Instance cannot be null")
+                .hasRootCauseInstanceOf(IllegalArgumentException.class);
+
+        // 其他 IllegalStateException / IllegalArgumentException（非负载均衡无实例）不做转换
         RestClient.Builder otherBug = RestClient.builder().requestInterceptor((request, body, execution) -> {
             throw new IllegalStateException("boom");
         });
         assertThatThrownBy(() -> ForecastTaskClients.create(otherBug, baseUrl()).getTask("FT1"))
                 .isInstanceOf(IllegalStateException.class).hasMessage("boom");
+        RestClient.Builder unrelatedArgBug = RestClient.builder().requestInterceptor((request, body, execution) -> {
+            throw new IllegalArgumentException("bad");
+        });
+        assertThatThrownBy(() -> ForecastTaskClients.create(unrelatedArgBug, baseUrl()).getTask("FT1"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("bad");
+        RestClient.Builder wrongType = RestClient.builder().requestInterceptor((request, body, execution) -> {
+            throw new IllegalStateException("Service Instance cannot be null");
+        });
+        assertThatThrownBy(() -> ForecastTaskClients.create(wrongType, baseUrl()).getTask("FT1"))
+                .isInstanceOf(IllegalStateException.class);
     }
 
+    /**
+     * 读取响应体中断（错误响应与成功响应）一律为 ResourceAccessException，便于按网络异常统一重试。
+     */
     @Test
-    void ioErrorWhileReadingErrorBodyIsResourceAccessException() {
+    void ioErrorWhileReadingBodyIsResourceAccessException() {
         ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), baseUrl());
         assertThatThrownBy(() -> client.getTask("TRUNCATED")).isInstanceOf(ResourceAccessException.class);
+        assertThatThrownBy(() -> client.getTask("TRUNCATED-OK")).isInstanceOf(ResourceAccessException.class);
     }
 
     /**

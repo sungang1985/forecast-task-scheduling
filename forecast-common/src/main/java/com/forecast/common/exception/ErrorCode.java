@@ -2,6 +2,12 @@ package com.forecast.common.exception;
 
 import lombok.Getter;
 
+import java.util.Arrays;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
 /**
  * 错误码定义。
  * <p>
@@ -44,6 +50,9 @@ public enum ErrorCode {
     JOB_CRON_INVALID(50400, "Cron 表达式非法", 400),
     JOB_CODE_DUPLICATED(50409, "定时任务编码重复", 409);
 
+    private static final Map<Integer, ErrorCode> BY_CODE = Arrays.stream(values())
+            .collect(Collectors.toUnmodifiableMap(ErrorCode::getCode, Function.identity()));
+
     private final int code;
     private final String message;
     /** 对应的 HTTP 状态码 */
@@ -53,5 +62,12 @@ public enum ErrorCode {
         this.code = code;
         this.message = message;
         this.httpStatus = httpStatus;
+    }
+
+    /**
+     * 按错误码查找；未定义的错误码（如更新版本服务端新增的）返回 empty。
+     */
+    public static Optional<ErrorCode> of(int code) {
+        return Optional.ofNullable(BY_CODE.get(code));
     }
 }

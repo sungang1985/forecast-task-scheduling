@@ -3,10 +3,14 @@ package com.forecast.api.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.forecast.common.constant.TraceHeaders;
+import com.forecast.common.exception.ErrorCode;
+import com.forecast.common.model.R;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
@@ -51,23 +55,29 @@ import java.nio.charset.StandardCharsets;
  * <p>
  * 返回与异常约定：
  * <ul>
- *     <li>服务端业务错误（统一结构 R，code != 0，如参数错误、任务不存在、未通过鉴权）：<b>不抛异常</b>，返回该 R。
- *     即使传入的 builder 自带错误状态处理器也是如此（客户端 http.client.requests 指标中这类响应记为 200，真实状态见服务端指标）；</li>
- *     <li>其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等）：抛 {@link ForecastClientException}（携带 HTTP 状态码）；
- *     若传入的 builder 已配置错误状态处理器，则由该处理器优先处理；</li>
- *     <li>网络异常（连接失败、超时、读取响应中断）以及按服务名调用但注册中心无可用实例：抛 Spring 的 {@code ResourceAccessException}。</li>
+ *     <li>服务端业务错误（JSON 响应体为统一结构 R，code != 0）：<b>不抛异常</b>，返回该 R。包括 4xx（参数错误、任务不存在、
+ *     未通过鉴权、队列已满）与 5xx（系统内部错误、引擎不可用、任务超时）；即使传入的 builder 自带错误状态处理器也是如此；</li>
+ *     <li>其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体、非 JSON 响应体等）：
+ *     抛 {@link ForecastClientException}（携带 HTTP 状态码）；若传入的 builder 已配置错误状态处理器，则由该处理器优先处理，
+ *     该处理器<b>必须抛出异常</b>：处理器不抛异常时 RestClient 会继续把响应体按 R 解码，非 R 错误可能得到 code == 0 的 R 或 null；</li>
+ *     <li>网络异常（连接失败、超时、读取响应体中断）以及按服务名调用但注册中心无可用实例：抛 Spring 的 {@code ResourceAccessException}。</li>
  * </ul>
- * 需要熔断/重试时，可在调用处使用 Resilience4j 包装。
+ * 业务错误在客户端被视为一次正常返回：http.client.requests 指标、链路追踪、负载均衡统计中都记为 200，
+ * 包在调用处的熔断器/重试也不会将其记为失败。服务端故障引起的业务错误（如 5xx）需要计入熔断时，用 {@link #isServerError(R)} 判断，
+ * 例如 Resilience4j {@code CircuitBreakerConfig.custom().recordResult(r -> r instanceof R<?> res && ForecastTaskClients.isServerError(res))}。
+ * 原始 HTTP 状态码放在内部响应头 {@link #ORIGINAL_STATUS_HEADER}，仅拦截器与观测约定可见，接口方法的返回值不含该信息。
  */
 public final class ForecastTaskClients {
 
-    /** 业务错误响应改写为 200 后，原始 HTTP 状态码放在该响应头中，便于排查 */
+    /** 业务错误响应改写为 200 后，原始 HTTP 状态码放在该响应头中（仅拦截器、观测约定可见），便于排查 */
     public static final String ORIGINAL_STATUS_HEADER = "X-Forecast-Original-Status";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_BODY_SNIPPET = 500;
-    /** Spring Cloud LoadBalancer 在无可用实例时抛出的 IllegalStateException 消息前缀 */
+    /** Spring Cloud LoadBalancer 无可用实例时的异常消息前缀：BlockingLoadBalancerClient 抛 IllegalStateException */
     private static final String NO_INSTANCES_PREFIX = "No instances available";
+    /** 引入 spring-retry 后由 RetryLoadBalancerInterceptor 选不到实例时，BlockingLoadBalancerClient 抛 IllegalArgumentException */
+    private static final String NULL_INSTANCE_PREFIX = "Service Instance cannot be null";
 
     private ForecastTaskClients() {
     }
@@ -82,7 +92,7 @@ public final class ForecastTaskClients {
                 .baseUrl(baseUrl)
                 // 放在拦截器链首位（负载均衡拦截器之前），把“注册中心无可用实例”统一为 ResourceAccessException
                 .requestInterceptors(interceptors -> interceptors.add(0, new NoInstanceInterceptor()))
-                .requestInterceptor(new BusinessErrorInterceptor())
+                .requestInterceptor(new BufferingInterceptor())
                 // 能到达这里的错误响应均不是服务端统一结构 R（业务错误已被拦截器转换），一律视为调用失败
                 .defaultStatusHandler(HttpStatusCode::isError, (request, response) -> {
                     String body;
@@ -111,8 +121,21 @@ public final class ForecastTaskClients {
                 .createClient(ForecastTaskClient.class);
     }
 
-    static boolean isBusinessError(byte[] content) {
-        if (content.length == 0) {
+    /**
+     * 业务错误是否由服务端故障引起：错误码对应 HTTP 5xx（如系统内部错误、Python 引擎不可用、任务执行超时），
+     * 或错误码未定义（如更新版本服务端新增的）。成功或 4xx 类错误（参数错误、任务不存在、限流等）返回 false。
+     * <p>
+     * 业务错误不抛异常，熔断器/重试默认不会把它记为失败；需要时以此作为 Resilience4j 的 recordResult / retryOnResult 条件。
+     */
+    public static boolean isServerError(R<?> result) {
+        if (result == null || result.isSuccess()) {
+            return false;
+        }
+        return ErrorCode.of(result.getCode()).map(code -> code.getHttpStatus() >= 500).orElse(true);
+    }
+
+    static boolean isBusinessError(HttpHeaders headers, byte[] content) {
+        if (content.length == 0 || !isJson(headers)) {
             return false;
         }
         try {
@@ -128,19 +151,35 @@ public final class ForecastTaskClients {
     }
 
     /**
-     * 缓存错误响应的响应体：服务端统一结构 R 的业务错误改写为 200（原状态码放入 {@link #ORIGINAL_STATUS_HEADER}），
-     * 使其不受任何错误状态处理器影响、按 R 正常解码；其他错误响应保留原状态码，交给状态处理器。
+     * 只有 JSON 响应体（application/json 或 application/*+json）才可能按 R 解码；
+     * 其他类型（text/plain、缺失 Content-Type 等）即使内容像 R，改写为 200 后也会因无法解码而抛出非约定的异常。
      */
-    static final class BusinessErrorInterceptor implements ClientHttpRequestInterceptor {
+    private static boolean isJson(HttpHeaders headers) {
+        MediaType contentType;
+        try {
+            contentType = headers.getContentType();
+        } catch (InvalidMediaTypeException e) {
+            return false;
+        }
+        return contentType != null && "application".equals(contentType.getType())
+                && ("json".equals(contentType.getSubtype()) || "json".equals(contentType.getSubtypeSuffix()));
+    }
+
+    /**
+     * 在拦截器内读完并缓存响应体：
+     * <ul>
+     *     <li>读取中断（含成功响应）以 IOException 抛出，由 RestClient 统一包装为 ResourceAccessException；</li>
+     *     <li>服务端统一结构 R 的业务错误改写为 200（原状态码放入 {@link #ORIGINAL_STATUS_HEADER}），
+     *     使其不受任何错误状态处理器影响、按 R 正常解码；其他错误响应保留原状态码，交给状态处理器。</li>
+     * </ul>
+     * 接口返回的响应体均有上限（结果分页最多 1000 点），缓存的额外内存开销可忽略。
+     */
+    static final class BufferingInterceptor implements ClientHttpRequestInterceptor {
 
         @Override
         public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution)
                 throws IOException {
             ClientHttpResponse response = execution.execute(request, body);
-            HttpStatusCode status = response.getStatusCode();
-            if (!status.isError()) {
-                return response;
-            }
             byte[] content;
             try (InputStream in = response.getBody()) {
                 content = StreamUtils.copyToByteArray(in);
@@ -149,7 +188,8 @@ public final class ForecastTaskClients {
                 response.close();
                 throw e;
             }
-            if (isBusinessError(content)) {
+            HttpStatusCode status = response.getStatusCode();
+            if (status.isError() && isBusinessError(response.getHeaders(), content)) {
                 HttpHeaders headers = new HttpHeaders();
                 headers.putAll(response.getHeaders());
                 headers.set(ORIGINAL_STATUS_HEADER, String.valueOf(status.value()));
@@ -160,8 +200,8 @@ public final class ForecastTaskClients {
     }
 
     /**
-     * Spring Cloud LoadBalancer 无可用实例时抛 IllegalStateException，RestClient 不会包装它；
-     * 转为 IOException 后由 RestClient 统一包装为 ResourceAccessException，与其他“服务不可达”情形一致。
+     * Spring Cloud LoadBalancer 无可用实例时抛 IllegalStateException（引入 spring-retry 后为 IllegalArgumentException），
+     * RestClient 不会包装它们；转为 IOException 后由 RestClient 统一包装为 ResourceAccessException，与其他“服务不可达”情形一致。
      */
     static final class NoInstanceInterceptor implements ClientHttpRequestInterceptor {
 
@@ -170,9 +210,11 @@ public final class ForecastTaskClients {
                 throws IOException {
             try {
                 return execution.execute(request, body);
-            } catch (IllegalStateException e) {
-                if (e.getMessage() != null && e.getMessage().startsWith(NO_INSTANCES_PREFIX)) {
-                    throw new IOException("注册中心中没有可用的预测任务服务实例: " + e.getMessage(), e);
+            } catch (IllegalStateException | IllegalArgumentException e) {
+                String message = e.getMessage();
+                if (message != null && (e instanceof IllegalStateException && message.startsWith(NO_INSTANCES_PREFIX)
+                        || e instanceof IllegalArgumentException && message.startsWith(NULL_INSTANCE_PREFIX))) {
+                    throw new IOException("注册中心中没有可用的预测任务服务实例: " + message, e);
                 }
                 throw e;
             }

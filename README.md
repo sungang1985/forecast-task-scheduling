@@ -145,11 +145,14 @@ ForecastTaskClient forecastTaskClient(@LoadBalanced RestClient.Builder builder) 
 | 情况 | 结果 |
 |---|---|
 | 调用成功 | 返回 `code == 0` 的 `R` |
-| 服务端业务错误（参数错误、任务不存在、未通过鉴权、队列已满等，响应体为统一结构 `R`） | **不抛异常**，返回 `code != 0` 的 `R`；即使传入的 builder 自带错误状态处理器（如 `RestClientCustomizer` 统一添加的）也是如此 |
-| 其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体等） | 抛 `ForecastClientException`：`getHttpStatus()` 为 HTTP 状态码，错误码 `REMOTE_CALL_FAILED`；`getMessage()` 只含状态码，请求地址与响应体片段通过 `getUri()`/`getResponseBody()` 获取，仅用于日志。若传入的 builder 已配置错误状态处理器，则由该处理器优先处理 |
-| 网络异常（连接失败、超时、读取响应中断）、按服务名调用但注册中心无可用实例 | 抛 Spring 的 `ResourceAccessException` |
+| 服务端业务错误：JSON 响应体为统一结构 `R`，包括 4xx（参数错误、任务不存在、未通过鉴权、队列已满等）与 5xx（系统内部错误、引擎不可用、任务超时等） | **不抛异常**，返回 `code != 0` 的 `R`；即使传入的 builder 自带错误状态处理器（如 `RestClientCustomizer` 统一添加的）也是如此 |
+| 其他错误响应（网关/代理错误页、Spring Boot 默认错误 JSON、空响应体、非 JSON 响应体等） | 抛 `ForecastClientException`：`getHttpStatus()` 为 HTTP 状态码，错误码 `REMOTE_CALL_FAILED`；`getMessage()` 只含状态码，请求地址（按服务名调用时为服务名地址，不是实例地址）与响应体片段通过 `getUri()`/`getResponseBody()` 获取，仅用于日志。若传入的 builder 已配置错误状态处理器，则由该处理器优先处理 |
+| 网络异常（连接失败、超时、读取响应体中断）、按服务名调用但注册中心无可用实例（含引入 spring-retry 的情形） | 抛 Spring 的 `ResourceAccessException` |
 
-可观测性说明：业务错误在客户端被视为一次正常的 `R` 返回，`http.client.requests` 指标中记为 200（原始状态码见响应头 `X-Forecast-Original-Status` 与服务端指标）；其他错误响应保留真实状态码。
+注意：
+
+- 调用方 builder 自带的错误状态处理器**必须抛出异常**。处理器不抛异常时 RestClient 会继续把响应体按 `R` 解码，非 `R` 错误（如 Spring Boot 默认错误 JSON）可能得到 `code == 0` 的 `R`（被误判为成功）或 `null`。
+- 业务错误在客户端被视为一次正常返回：`http.client.requests` 指标、链路追踪、负载均衡统计中都记为 200，包在调用处的熔断器/重试也不会将其记为失败。原始状态码放在内部响应头 `X-Forecast-Original-Status`，只有拦截器与观测约定能看到，接口方法的返回值不含该信息；以服务端指标为准。其他错误响应保留真实状态码。
 
 ```java
 R<TaskSubmitResult> r = forecastTaskClient.submit("LOAD", "full", 0, request);
@@ -158,7 +161,14 @@ if (!r.isSuccess()) {
 }
 ```
 
-需要熔断/重试时，在调用处用 Resilience4j 包装。
+需要熔断/重试时，在调用处用 Resilience4j 包装。服务端故障引起的业务错误（错误码对应 HTTP 5xx，或未定义的错误码）需要计入熔断时，用 `ForecastTaskClients.isServerError` 判断：
+
+```java
+CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+        .recordExceptions(ResourceAccessException.class, ForecastClientException.class)
+        .recordResult(result -> result instanceof R<?> r && ForecastTaskClients.isServerError(r))
+        .build();
+```
 
 ## 定时任务
 

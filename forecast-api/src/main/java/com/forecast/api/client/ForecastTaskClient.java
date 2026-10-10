@@ -19,8 +19,9 @@ import org.springframework.web.service.annotation.PostExchange;
  * 通过 {@link ForecastTaskClients#create} 创建实例；在 Spring Cloud 中配合 {@code @LoadBalanced RestClient.Builder}
  * 与服务名（如 {@code http://forecast-task-server}）即可经注册中心负载均衡调用（Bean 配置见 {@link ForecastTaskClients}）。
  * <p>
- * 服务端业务错误（响应体为统一结构 {@link R} 且 code != 0）不会抛出异常，而是直接返回该 R；
- * 非 R 结构的错误响应抛 {@link ForecastClientException}；网络异常及注册中心无可用实例抛 {@code ResourceAccessException}。
+ * 服务端业务错误（JSON 响应体为统一结构 {@link R} 且 code != 0，含 4xx 与 5xx）不会抛出异常，而是直接返回该 R；
+ * 非 R 结构的错误响应抛 {@link ForecastClientException}；网络异常（含读取响应体中断）及注册中心无可用实例抛
+ * {@code ResourceAccessException}。业务错误不会被熔断器记为失败，需要时用 {@link ForecastTaskClients#isServerError(R)} 判断。
  * 完整约定见 {@link ForecastTaskClients}。
  */
 @HttpExchange("/api/v1")
