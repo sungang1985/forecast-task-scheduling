@@ -11,6 +11,8 @@ forecast:
   demo:
     enabled: true
     history-days: 40
+  scheduler:
+    enabled: false
   transfer:
     # 小分片，验证分批传输
     chunk-rows: 1000

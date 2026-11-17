@@ -109,6 +109,11 @@ forecast:
     hot-ttl: 5m
     hot-window: 3d
     redis-enabled: ${CACHE_REDIS_ENABLED:false}
+  scheduler:
+    enabled: ${SCHEDULER_ENABLED:true}
+    pool-size: 4
+    refresh-interval: 30s
+    misfire-threshold: 1m
   task:
     default-timeout: 2h
     max-wait-seconds: 300

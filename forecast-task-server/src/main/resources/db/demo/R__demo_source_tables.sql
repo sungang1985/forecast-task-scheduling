@@ -152,3 +152,28 @@ SELECT 1003, 'weather_hourly', '逐小时气象', 'ods_weather_hourly', 'LONG_TI
        NULL, NULL, NULL, '{"temperature":"temperature","humidity":"humidity"}', NULL, 'MONTH', 1, 1,
        '长表：时间列 + 指标列', NOW(), NOW()
 WHERE NOT EXISTS (SELECT 1 FROM forecast_data_source WHERE source_code = 'weather_hourly');
+
+-- 演示定时任务：每天 06:00 负荷一体化预测、06:30 量价一体化预测
+INSERT INTO forecast_job_config (id, job_code, job_name, task_type, mode, cron_expression, time_zone, task_params,
+                                 enabled, concurrent_policy, misfire_policy, max_retries, retry_interval_seconds,
+                                 timeout_seconds, description, version, created_at, updated_at)
+SELECT 2001, 'LOAD_DAY_AHEAD', '日前负荷一体化预测', 'LOAD', 'FULL', '0 0 6 * * *', 'Asia/Shanghai',
+       '{"seriesKeys":["AREA_01","AREA_02","AREA_03"],"historyDays":60,"historyEndOffsetDays":0,"forecastStartOffsetDays":1,"horizonHours":24}',
+       1, 'SKIP', 'FIRE_ONCE', 2, 300, 3600, '每天 6 点预测次日 96 点负荷', 0, NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM forecast_job_config WHERE job_code = 'LOAD_DAY_AHEAD');
+
+INSERT INTO forecast_job_config (id, job_code, job_name, task_type, mode, cron_expression, time_zone, task_params,
+                                 enabled, concurrent_policy, misfire_policy, max_retries, retry_interval_seconds,
+                                 timeout_seconds, description, version, created_at, updated_at)
+SELECT 2002, 'PRICE_DAY_AHEAD', '日前量价一体化预测', 'PRICE', 'FULL', '0 30 6 * * *', 'Asia/Shanghai',
+       '{"seriesKeys":["MARKET_A"],"historyDays":60,"historyEndOffsetDays":0,"forecastStartOffsetDays":1,"horizonHours":24}',
+       1, 'SKIP', 'IGNORE', 1, 300, 3600, '每天 6:30 预测次日 96 时段出清价格与电量', 0, NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM forecast_job_config WHERE job_code = 'PRICE_DAY_AHEAD');
+
+INSERT INTO forecast_job_config (id, job_code, job_name, task_type, mode, cron_expression, time_zone, task_params,
+                                 enabled, concurrent_policy, misfire_policy, max_retries, retry_interval_seconds,
+                                 timeout_seconds, description, version, created_at, updated_at)
+SELECT 2003, 'LOAD_ROLLING_PREDICT', '负荷滚动预测（演示，默认停用）', 'LOAD', 'PREDICT', '0 */15 * * * *', 'Asia/Shanghai',
+       '{"seriesKeys":["AREA_01"],"historyDays":14,"historyEndOffsetDays":1,"forecastStartOffsetDays":0,"horizonHours":24}',
+       0, 'SKIP', 'IGNORE', 0, 60, 600, '每 15 分钟使用最新模型滚动预测', 0, NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM forecast_job_config WHERE job_code = 'LOAD_ROLLING_PREDICT');

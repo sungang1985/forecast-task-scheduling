@@ -5,6 +5,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -18,6 +19,7 @@ public class ExecutorConfig {
 
     public static final String TASK_EXECUTOR = "forecastTaskExecutor";
     public static final String TRANSFER_EXECUTOR = "dataTransferExecutor";
+    public static final String JOB_SCHEDULER = "forecastJobTaskScheduler";
 
     /**
      * 预测任务执行线程池：有界队列 + AbortPolicy，队列满时拒绝并向调用方返回“系统繁忙”，实现过载保护。
@@ -54,6 +56,22 @@ public class ExecutorConfig {
         executor.setTaskDecorator(mdcTaskDecorator());
         executor.initialize();
         return executor;
+    }
+
+    /**
+     * 定时任务触发调度器（仅负责“准点触发”，实际预测在 forecastTaskExecutor 中执行）。
+     */
+    @Bean(name = JOB_SCHEDULER)
+    public ThreadPoolTaskScheduler forecastJobTaskScheduler(ForecastProperties properties) {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setThreadNamePrefix("forecast-job-");
+        scheduler.setPoolSize(properties.getScheduler().getPoolSize());
+        scheduler.setRemoveOnCancelPolicy(true);
+        scheduler.setWaitForTasksToCompleteOnShutdown(false);
+        scheduler.setErrorHandler(t -> org.slf4j.LoggerFactory.getLogger(ExecutorConfig.class)
+                .error("定时触发执行异常", t));
+        scheduler.initialize();
+        return scheduler;
     }
 
     /**

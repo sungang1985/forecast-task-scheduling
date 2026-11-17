@@ -109,6 +109,55 @@ CREATE TABLE IF NOT EXISTS forecast_model
     KEY idx_model_type_status (task_type, status, created_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='模型注册表';
 
+-- 定时任务配置
+CREATE TABLE IF NOT EXISTS forecast_job_config
+(
+    id                     BIGINT        NOT NULL,
+    job_code               VARCHAR(64)   NOT NULL,
+    job_name               VARCHAR(128)  NOT NULL,
+    task_type              VARCHAR(32)   NOT NULL,
+    mode                   VARCHAR(16)   NOT NULL,
+    cron_expression        VARCHAR(64)   NOT NULL COMMENT 'Spring 6 位 Cron：秒 分 时 日 月 周',
+    time_zone              VARCHAR(64)   NULL,
+    task_params            TEXT          NULL COMMENT '任务参数模板(JSON)，时间窗口相对触发时间计算',
+    enabled                TINYINT       NOT NULL DEFAULT 1,
+    concurrent_policy      VARCHAR(16)   NOT NULL DEFAULT 'SKIP' COMMENT 'SKIP:上次未结束则跳过 / ALLOW',
+    misfire_policy         VARCHAR(16)   NOT NULL DEFAULT 'IGNORE' COMMENT 'IGNORE / FIRE_ONCE',
+    max_retries            INT           NOT NULL DEFAULT 0,
+    retry_interval_seconds INT           NOT NULL DEFAULT 300,
+    timeout_seconds        INT           NULL,
+    description            VARCHAR(512)  NULL,
+    last_fire_time         DATETIME(3)   NULL,
+    next_fire_time         DATETIME(3)   NULL,
+    last_task_id           VARCHAR(40)   NULL,
+    last_status            VARCHAR(16)   NULL,
+    version                INT           NOT NULL DEFAULT 0,
+    created_at             DATETIME(3)   NOT NULL,
+    updated_at             DATETIME(3)   NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_job_config_code (job_code)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='定时任务配置';
+
+-- 定时任务触发记录：(job_id, fire_time, attempt) 唯一，保证集群多实例下同一触发点只执行一次
+CREATE TABLE IF NOT EXISTS forecast_job_fire_log
+(
+    id               BIGINT        NOT NULL,
+    job_id           BIGINT        NOT NULL,
+    fire_time        DATETIME(3)   NOT NULL COMMENT '计划触发时间',
+    attempt          INT           NOT NULL DEFAULT 0 COMMENT '0 为首次，>0 为失败重试',
+    trigger_type     VARCHAR(16)   NOT NULL,
+    actual_fire_time DATETIME(3)   NOT NULL,
+    node             VARCHAR(128)  NULL,
+    task_id          VARCHAR(40)   NULL,
+    status           VARCHAR(16)   NOT NULL COMMENT 'TRIGGERED/SKIPPED/SUCCESS/FAILED/...',
+    message          VARCHAR(2000) NULL,
+    created_at       DATETIME(3)   NOT NULL,
+    updated_at       DATETIME(3)   NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_job_fire (job_id, fire_time, attempt),
+    KEY idx_job_fire_task (task_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='定时任务触发记录';
+
 -- 预训练数据源元数据：描述不同表结构如何映射为统一的 (series_key, ts, fields...) 时序数据
 CREATE TABLE IF NOT EXISTS forecast_data_source
 (

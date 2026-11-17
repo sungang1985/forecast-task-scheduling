@@ -27,6 +27,7 @@ public class ForecastProperties {
     private Engine engine = new Engine();
     private Transfer transfer = new Transfer();
     private Cache cache = new Cache();
+    private Scheduler scheduler = new Scheduler();
     private Task task = new Task();
     private Callback callback = new Callback();
     private Demo demo = new Demo();
@@ -110,6 +111,16 @@ public class ForecastProperties {
         private int maxKeysPerQuery = 200;
         /** 读库 fetchSize */
         private int fetchSize = 5000;
+    }
+
+    @Data
+    public static class Scheduler {
+        private boolean enabled = true;
+        private int poolSize = 4;
+        /** 从数据库刷新定时任务配置的间隔 */
+        private Duration refreshInterval = Duration.ofSeconds(30);
+        /** 错过触发的宽限期，超过且策略为 FIRE_ONCE 时补偿触发一次 */
+        private Duration misfireThreshold = Duration.ofMinutes(1);
     }
 
     @Data

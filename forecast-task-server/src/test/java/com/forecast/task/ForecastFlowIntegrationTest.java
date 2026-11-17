@@ -1,7 +1,14 @@
 package com.forecast.task;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.forecast.common.enums.TriggerType;
 import com.forecast.task.data.cache.SegmentCache;
+import com.forecast.task.domain.entity.JobConfig;
+import com.forecast.task.domain.entity.JobFireLog;
+import com.forecast.task.mapper.JobFireLogMapper;
+import com.forecast.task.schedule.JobConfigService;
+import com.forecast.task.schedule.JobFireService;
 import com.forecast.task.support.FakePythonEngine;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -14,11 +21,16 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * 集成测试：真实 Spring 上下文 + H2（含演示表/演示数据）+ 协议一致的 Python 引擎替身。
@@ -43,6 +55,12 @@ class ForecastFlowIntegrationTest {
     TestRestTemplate rest;
     @Autowired
     SegmentCache segmentCache;
+    @Autowired
+    JobConfigService jobConfigService;
+    @Autowired
+    JobFireService jobFireService;
+    @Autowired
+    JobFireLogMapper fireLogMapper;
 
     private static Map<String, Object> loadRequest(String requestId) {
         LocalDate today = LocalDate.now();
@@ -146,5 +164,31 @@ class ForecastFlowIntegrationTest {
                 Map.of("seriesKeys", List.of("AREA_99")), JsonNode.class);
         assertThat(noModel.getStatusCode().value()).isEqualTo(404);
         assertThat(noModel.getBody().get("code").asInt()).isEqualTo(40404);
+    }
+
+    @Test
+    void scheduledFireIsDeduplicatedAndResultWrittenBack() {
+        JobConfig job = jobConfigService.listAll().stream()
+                .filter(j -> "LOAD_DAY_AHEAD".equals(j.getJobCode())).findFirst().orElseThrow();
+        ZonedDateTime fireTime = ZonedDateTime.now(ZoneId.of("Asia/Shanghai")).truncatedTo(ChronoUnit.MINUTES);
+
+        Optional<JobFireLog> first = jobFireService.fire(job, fireTime, 0, TriggerType.SCHEDULE, null);
+        // 模拟集群中另一个节点在同一触发点触发
+        Optional<JobFireLog> second = jobFireService.fire(job, fireTime, 0, TriggerType.SCHEDULE, null);
+
+        assertThat(first).isPresent();
+        assertThat(second).isEmpty();
+        String taskId = first.get().getTaskId();
+        assertThat(taskId).isNotBlank();
+
+        await().atMost(java.time.Duration.ofSeconds(60)).untilAsserted(() -> {
+            JobFireLog log = fireLogMapper.selectOne(Wrappers.<JobFireLog>lambdaQuery().eq(JobFireLog::getTaskId, taskId));
+            assertThat(log.getStatus()).isEqualTo("SUCCESS");
+            assertThat(jobConfigService.require(job.getId()).getLastStatus()).isEqualTo("SUCCESS");
+        });
+        JsonNode task = rest.getForObject("/api/v1/tasks/" + taskId, JsonNode.class).get("data");
+        assertThat(task.get("triggerType").asText()).isEqualTo("SCHEDULE");
+        assertThat(task.get("jobId").asText()).isEqualTo(String.valueOf(job.getId()));
+        assertThat(task.get("resultSummary").get("resultRows").asInt()).isEqualTo(3 * 96);
     }
 }
