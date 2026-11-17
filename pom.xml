@@ -20,6 +20,8 @@
 
     <modules>
         <module>forecast-common</module>
+        <module>forecast-api</module>
+        <module>forecast-task-server</module>
     </modules>
 
     <properties>
@@ -27,6 +29,8 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <swagger-annotations.version>2.2.43</swagger-annotations.version>
     </properties>
 
     <dependencyManagement>
@@ -34,6 +38,11 @@
             <dependency>
                 <groupId>com.forecast</groupId>
                 <artifactId>forecast-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.forecast</groupId>
+                <artifactId>forecast-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
