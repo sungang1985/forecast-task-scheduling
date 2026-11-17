@@ -63,3 +63,17 @@ management:
   info:
     env:
       enabled: true
+  health:
+    redis:
+      enabled: ${forecast.cache.redis-enabled}
+
+
+# ========================= 业务配置 =========================
+forecast:
+  cache:
+    enabled: true
+    local-max-rows: 5000000
+    history-ttl: 12h
+    hot-ttl: 5m
+    hot-window: 3d
+    redis-enabled: ${CACHE_REDIS_ENABLED:false}

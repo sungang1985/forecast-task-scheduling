@@ -4,6 +4,7 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 
 /**
  * 平台全部可配置项（前缀 forecast）。接入 Nacos 配置中心后，修改即可热刷新
@@ -23,6 +24,20 @@ public class ForecastProperties {
 
     @Data
     public static class Cache {
+        private boolean enabled = true;
+        /** 本地缓存最大行数（按行数加权淘汰） */
+        private long localMaxRows = 5_000_000L;
+        /** 历史分段（已稳定数据）缓存时长 */
+        private Duration historyTtl = Duration.ofHours(12);
+        /** 近期分段（可能仍在补录的数据）缓存时长 */
+        private Duration hotTtl = Duration.ofMinutes(5);
+        /** 距当前时间多久以内的分段视为“近期分段” */
+        private Duration hotWindow = Duration.ofDays(3);
+        /** 是否启用 Redis 二级缓存（多实例共享） */
+        private boolean redisEnabled = false;
+        private String redisKeyPrefix = "forecast:data:";
+        /** 多实例下通过 Redis 发布订阅同步本地缓存失效 */
+        private String evictChannel = "forecast:cache:evict";
         /** 单次 IN 查询的最大 key 数量 */
         private int maxKeysPerQuery = 200;
         /** 读库 fetchSize */
