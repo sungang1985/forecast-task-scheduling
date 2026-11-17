@@ -9,6 +9,16 @@ spring:
       maximum-pool-size: 20
   flyway:
     locations: classpath:db/migration,classpath:db/demo
+  cloud:
+    # 未接入注册中心时，用 simple discovery 声明 Python 引擎实例（可配多个，轮询选择）；
+    # order 较大表示优先级低于 Nacos：开启 Nacos 且有实例时以 Nacos 为准
+    discovery:
+      client:
+        simple:
+          order: 100
+          instances:
+            forecast-python-engine:
+              - uri: ${ENGINE_URL:http://localhost:8000}
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -23,3 +33,4 @@ logging:
   level:
     com.forecast: debug
     com.forecast.task.mapper: info
+    com.alibaba.nacos: warn

@@ -5,9 +5,9 @@
 
 ## 进度总览
 
-**当前进度：7 / 15 天（47%）**
+**当前进度：8 / 15 天（53%）**
 
-`███████░░░░░░░░`
+`████████░░░░░░░`
 
 | 天 | 阶段 | 主题 | 状态 | 当天新增文件 | 当天新增代码行 | 累计代码行 | 自动化测试（累计通过） |
 |---|---|---|---|---|---|---|---|
@@ -18,7 +18,7 @@
 | [D5](#day-05) | 二、数据与引擎 | 分段缓存与取数服务 | ✅ 完成 | 11 | +1020 | 4088 | 8 |
 | [D6](#day-06) | 二、数据与引擎 | Python 引擎（上）：协议与存储 | ✅ 完成 | 12 | +878 | 4966 | Java 8 + Python 3 |
 | [D7](#day-07) | 二、数据与引擎 | Python 引擎（下）：算法流程 | ✅ 完成 | 10 | +923 / −8 | 5881 | Java 8 + Python 8 |
-| D8 | 二、数据与引擎 | Java 引擎客户端 | ⬜ 未开始 | – | – | – | – |
+| [D8](#day-08) | 二、数据与引擎 | Java 引擎客户端 | ✅ 完成 | 9 | +725 / −1 | 6605 | Java 8 + Python 8 |
 | D9 | 三、编排与调度 | 流程编排框架 | ⬜ 未开始 | – | – | – | – |
 | D10 | 三、编排与调度 | 分批传输与内置步骤 | ⬜ 未开始 | – | – | – | – |
 | D11 | 三、编排与调度 | 任务提交与对外接口 | ⬜ 未开始 | – | – | – | – |
@@ -317,3 +317,42 @@
 - Java 侧未改动，`mvn verify` 仍为 8 个测试通过。
 
 **遗留与明日计划**：Nacos 注册与 Docker 镜像今天只写了代码，没有可用的 Nacos 和 Docker 环境，未实际运行验证。明天回到 Java 侧，实现调用引擎的客户端。
+
+<a id="day-08"></a>
+### Day 08 · Java 引擎客户端
+
+**目标**：Java 服务能稳定地调用 Python 引擎——有连接池、会重试、能熔断、知道该连哪个实例。
+
+**完成内容**
+
+| 交付物 | 说明 |
+|---|---|
+| 依赖 | Spring Cloud 与 Spring Cloud Alibaba BOM、Nacos 服务发现、Resilience4j、Apache HttpClient 5 |
+| `EngineDtos` | 与引擎协议一一对应的请求 / 响应对象（Java record） |
+| `PythonEngineClient` | 引擎客户端抽象：健康检查、数据集创建 / 上传分片 / 完成 / 删除、提交预处理 / 训练 / 预测、查询与取消任务、分页取结果 |
+| `HttpPythonEngineClient` | HTTP 实现。统一调用入口按“异常翻译 → 熔断 → 重试 → 指标”的顺序包装每次调用，记录 `forecast_engine_calls_seconds{operation,outcome}` |
+| `EngineClientConfig` | HttpClient 5 连接池；专用的 snake_case `ObjectMapper`；拦截器透传 `X-Trace-Id`、`X-Task-Id`、`X-Engine-Token`；重试（指数退避）与熔断器 |
+| `EngineCallException` / `EngineTaskFailedException` | 调用异常（带“是否可重试”标记）与引擎任务执行失败异常 |
+| `EngineEndpoint` / `EngineEndpointResolver` | 引擎实例地址及其解析：配置了 `forecast.engine.base-url` 则直连，否则从注册中心按服务名发现并轮询 |
+| `PythonEngineHealthIndicator` | 把引擎健康状况纳入 `/actuator/health`（组件名 `pythonEngine`），附带熔断器状态 |
+| `ForecastProperties.Engine` | 地址、令牌、服务名、超时、连接池、轮询间隔、重试与熔断参数 |
+| 配置 | `spring.cloud.nacos.discovery`（默认关闭）；dev 环境用 simple discovery 声明本地引擎实例；Actuator 暴露 `retries`、`circuitbreakers` 端点 |
+
+**关键设计**
+
+- **只对瞬时故障重试和计入熔断**。网络异常、5xx、429 标记为可重试；4xx 是请求本身有问题，重试没有意义，也不应把熔断器打开。
+- **重试是安全的**。所有提交类接口都带 `request_id`，引擎侧去重（D6 已实现），上传分片本身幂等，所以客户端重试不会产生重复任务或重复数据。
+- **客户端是接口**。流程编排只依赖 `PythonEngineClient`，以后改成 gRPC 或消息队列只需换一个实现。
+- **引擎不在就绪探针里**。引擎不可用时服务仍然是就绪的（还能查任务、管配置），只是引擎健康组件显示 DOWN；否则引擎一抖动，所有服务实例都会被摘流量。
+- **开发环境不依赖 Nacos**。Nacos 默认关闭，dev 用 Spring Cloud 的 simple discovery 把 `forecast-python-engine` 指到 `localhost:8000`；开启 Nacos 后以 Nacos 的实例为准。
+
+**验证**
+
+- `mvn verify`：构建成功，Java 8 个测试通过（今天没有新增自动化测试）。
+- 手工启动服务，**不启动引擎**：
+  - `GET /actuator/health/pythonEngine` 返回 HTTP 503，`{"status":"DOWN","details":{"error":"…Connection refused","circuitBreaker":"CLOSED"}}`；
+  - `GET /actuator/health/readiness` 仍为 UP；
+  - `GET /actuator/circuitbreakers` 能看到 `pythonEngine` 熔断器，阈值 50%。
+- **同时启动 D7 的 Python 引擎**（端口 8000）：`GET /actuator/health/pythonEngine` 返回 `{"status":"UP","details":{"endpoint":"http://localhost:8000","version":"1.0.0","workers":4,…}}`。这是 Java 与 Python 第一次真实连通。
+
+**遗留与明日计划**：客户端的各业务方法今天只通过健康检查间接验证了连通性和 JSON 协议，逐个方法的验证在 D11 的集成测试里。明天做流程编排框架。

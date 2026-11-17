@@ -26,6 +26,13 @@ spring:
     baseline-on-migrate: true
     # 演示脚本（可重复迁移）在关闭演示后不再存在，忽略其缺失，避免启动校验失败
     ignore-migration-patterns: "repeatable:missing"
+  cloud:
+    nacos:
+      discovery:
+        enabled: ${NACOS_ENABLED:false}
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
 
 mybatis-plus:
   configuration:
@@ -40,7 +47,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,loggers,threaddump
+        include: health,info,metrics,loggers,threaddump,retries,circuitbreakers
   endpoint:
     health:
       show-details: always
@@ -70,6 +77,20 @@ management:
 
 # ========================= 业务配置 =========================
 forecast:
+  engine:
+    # 直连地址（优先）；留空则通过注册中心按 service-id 选择实例
+    base-url: ${ENGINE_BASE_URL:}
+    # 与 Python 引擎 ENGINE_TOKEN 保持一致
+    token: ${ENGINE_TOKEN:}
+    service-id: forecast-python-engine
+    connect-timeout: 3s
+    read-timeout: 60s
+    poll-initial-interval: 500ms
+    poll-max-interval: 2s
+    retry-max-attempts: 3
+    retry-initial-interval: 500ms
+    cleanup-datasets: true
+    result-page-size: 5000
   cache:
     enabled: true
     local-max-rows: 5000000

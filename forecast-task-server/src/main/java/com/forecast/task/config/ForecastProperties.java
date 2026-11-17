@@ -19,8 +19,36 @@ public class ForecastProperties {
     /** 当前节点标识，为空时自动使用 主机名:端口 */
     private String nodeId;
 
+    private Engine engine = new Engine();
     private Cache cache = new Cache();
     private Demo demo = new Demo();
+
+    @Data
+    public static class Engine {
+        /** 直连地址（优先）；为空时通过注册中心按 serviceId 负载均衡选择实例 */
+        private String baseUrl;
+        /** 与 Python 引擎约定的访问令牌（请求头 X-Engine-Token），为空表示不鉴权 */
+        private String token;
+        private String serviceId = "forecast-python-engine";
+        private Duration connectTimeout = Duration.ofSeconds(3);
+        private Duration readTimeout = Duration.ofSeconds(60);
+        private int maxConnections = 200;
+        private int maxConnectionsPerRoute = 50;
+        /** 轮询 Python 异步任务状态的初始/最大间隔 */
+        private Duration pollInitialInterval = Duration.ofMillis(500);
+        private Duration pollMaxInterval = Duration.ofSeconds(2);
+        /** 任务结束后是否清理 Python 端的临时数据集 */
+        private boolean cleanupDatasets = true;
+        /** 分页拉取预测结果的页大小 */
+        private int resultPageSize = 5000;
+        /** 调用重试次数（含首次） */
+        private int retryMaxAttempts = 3;
+        private Duration retryInitialInterval = Duration.ofMillis(500);
+        /** 熔断：失败率阈值与打开后等待时长 */
+        private float circuitFailureRateThreshold = 50f;
+        private int circuitSlidingWindowSize = 20;
+        private Duration circuitOpenWait = Duration.ofSeconds(30);
+    }
 
     @Data
     public static class Cache {
