@@ -2,8 +2,8 @@
 
 接口分三类：
 1. 数据集分批上传：创建会话 -> 幂等上传分片（gzip + CRC32 + 行数校验）-> 完成合并（缺片检测）；
-2. 异步任务：状态查询与取消（预处理 / 训练 / 预测的提交接口随算法流程一起接入）；
-3. 健康检查。
+2. 异步任务：预处理 / 训练 / 预测，提交即返回 task_id，调用方轮询状态，可取消；
+3. 预测结果分页拉取、健康检查。
 """
 from __future__ import annotations
 
@@ -17,15 +17,20 @@ import zlib
 from contextlib import asynccontextmanager
 
 import pandas as pd
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
-from . import storage
+from . import registry, storage
 from .config import settings
 from .logging_context import setup_logging, task_id_var, trace_id_var
+from .pipeline import algorithms
+from .pipeline.predict import run_predict
+from .pipeline.preprocess import run_preprocess
+from .pipeline.train import run_train
 from .schemas import (CompleteDatasetRequest, CompleteDatasetResponse, CreateDatasetRequest,
-                      CreateDatasetResponse, EngineHealth, EngineTaskRef, EngineTaskStatus)
+                      CreateDatasetResponse, EngineHealth, EngineTaskRef, EngineTaskStatus, PredictionPage,
+                      PredictionRow, PredictRequest, PreprocessRequest, TrainRequest)
 from .tasks import task_manager
 
 setup_logging()
@@ -48,10 +53,12 @@ def _housekeeping() -> None:
 async def lifespan(_: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_housekeeping, name="housekeeping", daemon=True).start()
-    log.info("Python 预测引擎启动 version=%s workers=%d dataDir=%s", settings.version, settings.workers,
-             settings.data_dir)
+    registry.register()
+    log.info("Python 预测引擎启动 version=%s workers=%d dataDir=%s algorithms=%s", settings.version,
+             settings.workers, settings.data_dir, sorted(algorithms.ALGORITHMS))
     yield
     _stop_event.set()
+    registry.deregister()
     task_manager.shutdown()
 
 
@@ -226,6 +233,40 @@ def _ref(state) -> EngineTaskRef:
     return EngineTaskRef(task_id=state.task_id, status=state.status)
 
 
+@app.post("/api/v1/preprocess", response_model=EngineTaskRef)
+def submit_preprocess(req: PreprocessRequest) -> EngineTaskRef:
+    storage.dataset_meta(req.dataset_id)
+    state = task_manager.submit(
+        "PREPROCESS",
+        lambda ctx: run_preprocess(ctx, req.dataset_id, req.task_type, req.targets, req.frequency, req.params),
+        req.request_id, req.task_id)
+    return _ref(state)
+
+
+@app.post("/api/v1/train", response_model=EngineTaskRef)
+def submit_train(req: TrainRequest) -> EngineTaskRef:
+    storage.load_processed(req.processed_dataset_id)
+    if req.algorithm not in algorithms.ALGORITHMS:
+        raise storage.ValidationError(f"不支持的算法: {req.algorithm}，可选: {sorted(algorithms.ALGORITHMS)}")
+    state = task_manager.submit(
+        "TRAIN",
+        lambda ctx: run_train(ctx, req.processed_dataset_id, req.task_type, req.targets, req.algorithm, req.params),
+        req.request_id, req.task_id)
+    return _ref(state)
+
+
+@app.post("/api/v1/predict", response_model=EngineTaskRef)
+def submit_predict(req: PredictRequest) -> EngineTaskRef:
+    storage.model_meta(req.model_id)
+    storage.dataset_meta(req.dataset_id)
+    state = task_manager.submit(
+        "PREDICT",
+        lambda ctx: run_predict(ctx, req.model_id, req.dataset_id, req.forecast_start.isoformat(),
+                                req.forecast_end.isoformat(), req.params),
+        req.request_id, req.task_id)
+    return _ref(state)
+
+
 @app.get("/api/v1/tasks/{task_id}", response_model=EngineTaskStatus)
 def get_task(task_id: str) -> EngineTaskStatus:
     state = task_manager.get(storage.check_id(task_id))
@@ -236,3 +277,27 @@ def get_task(task_id: str) -> EngineTaskStatus:
 @app.post("/api/v1/tasks/{task_id}/cancel", response_model=EngineTaskRef)
 def cancel_task(task_id: str) -> EngineTaskRef:
     return _ref(task_manager.cancel(storage.check_id(task_id)))
+
+
+# ------------------------------------------------------------------ results / models
+
+@app.get("/api/v1/predictions/{prediction_id}", response_model=PredictionPage)
+def get_predictions(prediction_id: str, offset: int = Query(0, ge=0), limit: int = Query(5000, ge=1, le=50000)):
+    df = storage.load_prediction(prediction_id)
+    page = df.iloc[offset: offset + limit]
+    rows = [PredictionRow(series_key=r.series_key, target=r.target, ts=pd.Timestamp(r.ts).to_pydatetime(),
+                          value=None if pd.isna(r.value) else float(r.value),
+                          lower=None if pd.isna(r.lower) else float(r.lower),
+                          upper=None if pd.isna(r.upper) else float(r.upper))
+            for r in page.itertuples(index=False)]
+    return PredictionPage(prediction_id=prediction_id, total=int(len(df)), offset=offset, rows=rows)
+
+
+@app.get("/api/v1/models/{model_id}")
+def get_model(model_id: str) -> dict:
+    return storage.model_meta(model_id)
+
+
+@app.get("/api/v1/algorithms")
+def list_algorithms() -> list[str]:
+    return sorted(algorithms.ALGORITHMS)
