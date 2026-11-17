@@ -5,6 +5,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 平台全部可配置项（前缀 forecast）。接入 Nacos 配置中心后，修改即可热刷新
@@ -21,7 +25,17 @@ public class ForecastProperties {
 
     private Engine engine = new Engine();
     private Cache cache = new Cache();
+    private Task task = new Task();
     private Demo demo = new Demo();
+
+    /** 预测任务类型定义，key 为任务类型编码（如 LOAD、PRICE） */
+    private Map<String, TaskTypeProperties> taskTypes = new LinkedHashMap<>();
+
+    /**
+     * 流程定义：流程名 -> (执行模式 -> 有序步骤名列表)。
+     * 新增预测流程时只需新增 ForecastStep 实现并在此编排，无需改动调度/执行代码。
+     */
+    private Map<String, Map<String, List<String>>> pipelines = new LinkedHashMap<>();
 
     @Data
     public static class Engine {
@@ -73,9 +87,56 @@ public class ForecastProperties {
     }
 
     @Data
+    public static class Task {
+        private Duration defaultTimeout = Duration.ofHours(2);
+        /** 同步等待最长时间（秒） */
+        private int maxWaitSeconds = 300;
+        /** 心跳间隔，用于识别宕机节点上的“僵尸任务” */
+        private Duration heartbeatInterval = Duration.ofSeconds(30);
+        private Duration staleTimeout = Duration.ofMinutes(5);
+        /** 可重试步骤的最大执行次数（含首次） */
+        private int stepMaxAttempts = 2;
+        private Duration stepRetryBackoff = Duration.ofSeconds(3);
+        /** 取消检测间隔 */
+        private Duration cancelCheckInterval = Duration.ofSeconds(3);
+    }
+
+    @Data
     public static class Demo {
         /** 启动时生成演示数据（仅开发环境） */
         private boolean enabled = false;
         private int historyDays = 120;
+    }
+
+    @Data
+    public static class TaskTypeProperties {
+        private String displayName;
+        /** 主数据源（预测目标所在表），对应 forecast_data_source.source_code */
+        private String primarySource;
+        /** 外生变量数据源（气象、负荷等） */
+        private List<ExogenousSource> exogenousSources = new ArrayList<>();
+        /** 预测目标字段 */
+        private List<String> targetFields = new ArrayList<>();
+        /** 数据频率（pandas 频率字符串） */
+        private String frequency = "15min";
+        private String defaultAlgorithm = "gbrt";
+        private int defaultHistoryDays = 90;
+        /** 预测模式下需要回看的历史天数（用于滞后特征） */
+        private int predictLookbackDays = 14;
+        private int defaultHorizonHours = 24;
+        private Duration timeout;
+        /** 引用的流程名 */
+        private String pipeline = "standard";
+        /** 默认算法参数 */
+        private Map<String, Object> params = new LinkedHashMap<>();
+    }
+
+    @Data
+    public static class ExogenousSource {
+        private String source;
+        /** true：与主数据按 (series_key, ts) 关联；false：仅按 ts 关联（多 key 时取均值） */
+        private boolean joinOnKey = true;
+        /** 预测阶段是否需要覆盖预测时段（如气象预报） */
+        private boolean coverForecastWindow = true;
     }
 }

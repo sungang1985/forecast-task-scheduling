@@ -63,6 +63,7 @@ management:
       application: ${spring.application.name}
     distribution:
       percentiles-histogram:
+        forecast.task.step: true
         http.server.requests: true
   tracing:
     sampling:
@@ -98,3 +99,10 @@ forecast:
     hot-ttl: 5m
     hot-window: 3d
     redis-enabled: ${CACHE_REDIS_ENABLED:false}
+  task:
+    default-timeout: 2h
+    max-wait-seconds: 300
+    heartbeat-interval: 30s
+    stale-timeout: 5m
+    step-max-attempts: 2
+    step-retry-backoff: 3s
