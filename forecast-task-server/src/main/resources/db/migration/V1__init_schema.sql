@@ -64,3 +64,28 @@ CREATE TABLE IF NOT EXISTS forecast_task_step
     PRIMARY KEY (id),
     KEY idx_task_step_task (task_id, step_order)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='预测任务步骤';
+
+-- 预训练数据源元数据：描述不同表结构如何映射为统一的 (series_key, ts, fields...) 时序数据
+CREATE TABLE IF NOT EXISTS forecast_data_source
+(
+    id                   BIGINT        NOT NULL,
+    source_code          VARCHAR(64)   NOT NULL,
+    source_name          VARCHAR(128)  NOT NULL,
+    table_name           VARCHAR(128)  NOT NULL,
+    layout               VARCHAR(16)   NOT NULL COMMENT 'LONG_TIME/DATE_PERIOD/WIDE_POINTS',
+    key_column           VARCHAR(64)   NULL COMMENT '预测对象列，为空表示单序列',
+    time_column          VARCHAR(64)   NULL COMMENT 'LONG_TIME 布局的时间列',
+    date_column          VARCHAR(64)   NULL COMMENT 'DATE_PERIOD/WIDE_POINTS 布局的日期列',
+    period_column        VARCHAR(64)   NULL COMMENT 'DATE_PERIOD 布局的时段序号列(1..N)',
+    points_per_day       INT           NULL COMMENT '每日点数 24/48/96/288',
+    field_mapping        VARCHAR(2000) NOT NULL COMMENT '字段映射 JSON：统一字段 -> 列名（WIDE_POINTS 为列名格式，如 p%03d）',
+    fixed_filters        VARCHAR(2000) NULL COMMENT '固定过滤条件 JSON：列名 -> 值',
+    segment_unit         VARCHAR(8)    NOT NULL DEFAULT 'MONTH' COMMENT '缓存分段粒度 DAY/MONTH',
+    cache_enabled        TINYINT       NOT NULL DEFAULT 1,
+    enabled              TINYINT       NOT NULL DEFAULT 1,
+    remark               VARCHAR(512)  NULL,
+    created_at           DATETIME(3)   NOT NULL,
+    updated_at           DATETIME(3)   NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_data_source_code (source_code)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='预训练数据源配置';

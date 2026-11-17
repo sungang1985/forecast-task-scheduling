@@ -24,6 +24,8 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+    # 演示脚本（可重复迁移）在关闭演示后不再存在，忽略其缺失，避免启动校验失败
+    ignore-migration-patterns: "repeatable:missing"
 
 mybatis-plus:
   configuration:

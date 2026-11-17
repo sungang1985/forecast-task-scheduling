@@ -17,4 +17,22 @@ public class ForecastProperties {
 
     /** 当前节点标识，为空时自动使用 主机名:端口 */
     private String nodeId;
+
+    private Cache cache = new Cache();
+    private Demo demo = new Demo();
+
+    @Data
+    public static class Cache {
+        /** 单次 IN 查询的最大 key 数量 */
+        private int maxKeysPerQuery = 200;
+        /** 读库 fetchSize */
+        private int fetchSize = 5000;
+    }
+
+    @Data
+    public static class Demo {
+        /** 启动时生成演示数据（仅开发环境） */
+        private boolean enabled = false;
+        private int historyDays = 120;
+    }
 }
