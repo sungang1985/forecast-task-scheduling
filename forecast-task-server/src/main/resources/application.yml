@@ -63,6 +63,7 @@ management:
       application: ${spring.application.name}
     distribution:
       percentiles-histogram:
+        forecast.task: true
         forecast.task.step: true
         http.server.requests: true
   tracing:
@@ -115,6 +116,10 @@ forecast:
     stale-timeout: 5m
     step-max-attempts: 2
     step-retry-backoff: 3s
+  callback:
+    allowed-hosts: []
+    max-attempts: 3
+    timeout: 5s
 
   # 流程编排：模式 -> 有序步骤。新增流程时新增 ForecastStep 实现并在此引用
   pipelines:

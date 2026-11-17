@@ -28,6 +28,7 @@ public class ForecastProperties {
     private Transfer transfer = new Transfer();
     private Cache cache = new Cache();
     private Task task = new Task();
+    private Callback callback = new Callback();
     private Demo demo = new Demo();
 
     /** 预测任务类型定义，key 为任务类型编码（如 LOAD、PRICE） */
@@ -124,6 +125,14 @@ public class ForecastProperties {
         private Duration stepRetryBackoff = Duration.ofSeconds(3);
         /** 取消检测间隔 */
         private Duration cancelCheckInterval = Duration.ofSeconds(3);
+    }
+
+    @Data
+    public static class Callback {
+        /** 允许回调的主机白名单（防 SSRF），为空表示不允许任何回调 */
+        private List<String> allowedHosts = new ArrayList<>();
+        private int maxAttempts = 3;
+        private Duration timeout = Duration.ofSeconds(5);
     }
 
     @Data

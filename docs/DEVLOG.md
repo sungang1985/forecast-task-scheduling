@@ -5,9 +5,9 @@
 
 ## 进度总览
 
-**当前进度：10 / 15 天（67%）**
+**当前进度：11 / 15 天（73%）**
 
-`██████████░░░░░`
+`███████████░░░░`
 
 | 天 | 阶段 | 主题 | 状态 | 当天新增文件 | 当天新增代码行 | 累计代码行 | 自动化测试（累计通过） |
 |---|---|---|---|---|---|---|---|
@@ -21,7 +21,7 @@
 | [D8](#day-08) | 二、数据与引擎 | Java 引擎客户端 | ✅ 完成 | 9 | +725 / −1 | 6605 | Java 8 + Python 8 |
 | [D9](#day-09) | 三、编排与调度 | 流程编排框架 | ✅ 完成 | 11 | +790 | 7395 | Java 13 + Python 8 |
 | [D10](#day-10) | 三、编排与调度 | 分批传输与内置步骤 | ✅ 完成 | 18 | +1546 | 8941 | Java 15 + Python 8 |
-| D11 | 三、编排与调度 | 任务提交与对外接口 | ⬜ 未开始 | – | – | – | – |
+| [D11](#day-11) | 三、编排与调度 | 任务提交与对外接口 | ✅ 完成 | 12 | +1497 | 10438 | Java 23 + Python 8 |
 | D12 | 三、编排与调度 | 定时调度 | ⬜ 未开始 | – | – | – | – |
 | D13 | 四、可观测与交付 | 监控、可靠性与安全 | ⬜ 未开始 | – | – | – | – |
 | D14 | 四、可观测与交付 | 微服务化 | ⬜ 未开始 | – | – | – | – |
@@ -448,3 +448,72 @@
 - 手工启动服务：日志显示 `已注册流程步骤: [LOAD_DATA, PERSIST_RESULT, PREDICT, PREPROCESS, TRAIN]，流程: [standard]`——说明五个步骤都已注册，且 `application.yml` 里的流程与任务类型配置通过了启动校验。
 
 **遗留与明日计划**：步骤都写好了，但还没有“提交任务”的入口，所以今天没法真正跑一次流程；传输服务与各步骤的端到端验证留给明天。明天是关键的一天：实现任务提交与对外接口，把前十天的部件接成一条完整链路。
+
+<a id="day-11"></a>
+### Day 11 · 任务提交与对外接口（首次端到端）
+
+**目标**：把前十天的部件接成一条完整链路——调用方发一个 HTTP 请求，平台完成取数、传输、预处理、训练、预测、入库，并能查到过程与结果。
+
+**完成内容**
+
+| 交付物 | 说明 |
+|---|---|
+| `ForecastTaskService` | 任务服务：提交（校验、幂等、落库、入线程池）、同步等待、取消、重试、执行与状态收尾、事件发布 |
+| `TaskRequestResolver` | 请求补全与校验：时间窗口默认值、目标字段、算法、参数合并（请求覆盖任务类型默认值）、超时 |
+| `RunningTaskRegistry` | 本节点的排队 / 运行中任务表，以及同步等待者 |
+| `SubmitOptions` | 提交的附加信息：触发方式、定时任务 ID、来源任务、重试次数 |
+| `ForecastController` | `POST /api/v1/forecast/{taskType}/{mode}?waitSeconds=`，以及任务类型与流程的查询 |
+| `TaskController` | 任务详情、分页查询、**SSE 实时进度**、取消、重试、结果分页、最新结果 |
+| `ModelController` | 模型列表、详情、切换当前使用的版本 |
+| `TaskEventStreamService` | 监听任务事件并通过 Server-Sent Events 推送，任务结束自动关闭连接 |
+| `ForecastProperties.Callback` | 回调主机白名单（提交时校验，防 SSRF；真正发回调在 D13） |
+| `FakePythonEngine`（测试） | 与真实引擎协议一致的替身：校验分片 CRC 与行数、异步任务、结果分页，并可注入故障 |
+| 测试 | `ForecastFlowIntegrationTest`（5 个）、`TaskRequestResolverTest`（3 个） |
+
+**一次提交的处理过程**
+
+1. 校验任务类型与流程存在，补全请求参数，校验回调地址；
+2. 按 `requestId` 查重，已存在则直接返回原任务（`duplicated=true`）；
+3. 预测模式下立即确定模型，没有可用模型就同步报错，不让任务空跑；
+4. 写入 PENDING 记录（并发提交同一 `requestId` 时由唯一索引兜底）；
+5. 提交到任务线程池；队列满则把任务置为失败并返回 429；
+6. 执行线程把任务置为 RUNNING，创建上下文，交给 `PipelineExecutor`；
+7. 根据结果或异常类型置为 SUCCESS / FAILED / CANCELLED / TIMEOUT，发布结束事件。
+
+**关键设计**
+
+- **默认异步，可选同步等待**。`waitSeconds=0` 立即返回 `taskId`；大于 0 时在该时间内等任务结束并直接带回详情，小规模预测用起来像同步接口，又不会无限期占着连接。
+- **过载保护**。任务池是有界队列，满了就明确拒绝并返回“系统繁忙”，而不是无限堆积拖垮服务。
+- **请求补全后再落库**。任务记录里存的是补全后的完整请求，重试时原样重放，结果可复现。
+- **取消是协作式的**。排队中的任务直接置为取消；运行中的任务设置取消标记，执行线程在步骤边界和轮询时感知，并通知引擎取消。
+- **以数据库状态为准**。执行线程收尾时如果发现任务已被别处置为终态，就采用数据库里的状态，不去覆盖。
+
+**验证**
+
+- `mvn verify`：构建成功，**Java 23 个测试全部通过**。集成测试用真实 Spring 上下文 + H2 演示数据 + 引擎替身，5 个场景：
+
+| 用例 | 验证点 |
+|---|---|
+| `fullLoadForecastRunsAllStepsTransfersInChunksAndPersistsResults` | 一体化预测五个步骤全部成功；每片 1000 行时主数据至少分 6 片；引擎收到的行数与读出的行数一致；任务结束后临时数据集被清理；结果 2 × 96 行入库；随后可直接用训练出的模型做 PREDICT |
+| `repeatedWindowIsServedFromCacheAndRequestIdIsIdempotent` | 相同时间窗口第二次不再读库；相同 `requestId` 返回同一任务 |
+| `transientEngineErrorsAreRetried` | 引擎连续两次瞬时故障后重试成功 |
+| `engineTaskFailureFailsTaskWithoutRetry` | 引擎任务失败时任务置为 FAILED、错误码 `ENGINE_TASK_FAILED`，且该步骤只尝试 1 次 |
+| `validationErrorsReturnBusinessCodes` | 未知任务类型返回 400 / `20400`；无可用模型返回 404 / `40404` |
+
+- **真实引擎联调**（不用替身）：同时启动 D7 的 Python 引擎和本服务，调用 `POST /api/v1/forecast/LOAD/full?waitSeconds=180`，请求体 `{"requestId":"e2e-d11","seriesKeys":["AREA_01"]}`。任务 3.9 秒完成，状态 SUCCESS：
+
+| 步骤 | 状态 | 耗时 | 说明 |
+|---|---|---|---|
+| LOAD_DATA | SUCCESS | 235 ms | 上传 10840 行（负荷 8632 + 气象 2208） |
+| PREPROCESS | SUCCESS | 564 ms | 规整为 8640 行，填补 8 个缺失点 |
+| TRAIN | SUCCESS | 2453 ms | gbrt，验证集 MAE 10.21、RMSE 14.32、MAPE 1.73% |
+| PREDICT | SUCCESS | 524 ms | 次日 96 个点 |
+| PERSIST_RESULT | SUCCESS | 29 ms | 入库 96 条 |
+
+  - `GET /api/v1/tasks/{id}/results` 返回 96 条，首条 `2026-11-18T00:00:00` 预测值 510.07，区间 [483.57, 536.57]；
+  - `GET /api/v1/models` 可见新模型，状态 ACTIVE，记录了所在引擎实例；
+  - 用同一个 `requestId` 再提交一次，返回同一个 `taskId` 且 `duplicated=true`；
+  - 该任务的 traceId 同时出现在 Java 日志和 Python 引擎日志里，两侧可以按 traceId 串起来；
+  - 两侧日志均无错误。
+
+**遗留与明日计划**：取消、重试、SSE 推送三个接口今天没有自动化测试，也没有手工逐个验证，属于已知的覆盖缺口。里程碑“D11 首次端到端跑通”按期达成。明天做定时调度。
