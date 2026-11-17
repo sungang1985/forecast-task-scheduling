@@ -65,6 +65,50 @@ CREATE TABLE IF NOT EXISTS forecast_task_step
     KEY idx_task_step_task (task_id, step_order)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='预测任务步骤';
 
+-- 预测结果
+CREATE TABLE IF NOT EXISTS forecast_result
+(
+    id             BIGINT         NOT NULL AUTO_INCREMENT,
+    task_id        VARCHAR(40)    NOT NULL,
+    task_type      VARCHAR(32)    NOT NULL,
+    job_id         BIGINT         NULL,
+    series_key     VARCHAR(64)    NOT NULL COMMENT '预测对象',
+    target_field   VARCHAR(64)    NOT NULL COMMENT '预测目标（load/price/volume...）',
+    forecast_time  DATETIME       NOT NULL,
+    forecast_value DECIMAL(18, 4) NULL,
+    lower_bound    DECIMAL(18, 4) NULL,
+    upper_bound    DECIMAL(18, 4) NULL,
+    model_id       VARCHAR(64)    NULL,
+    created_at     DATETIME(3)    NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_result_task (task_id),
+    KEY idx_result_series_time (task_type, series_key, target_field, forecast_time)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='预测结果';
+
+-- 模型注册表
+CREATE TABLE IF NOT EXISTS forecast_model
+(
+    id             BIGINT        NOT NULL,
+    model_id       VARCHAR(64)   NOT NULL,
+    task_type      VARCHAR(32)   NOT NULL,
+    algorithm      VARCHAR(32)   NOT NULL,
+    series_keys    VARCHAR(4000) NULL COMMENT '训练覆盖的预测对象，逗号分隔，* 表示全部',
+    target_fields  VARCHAR(255)  NULL,
+    train_start    DATETIME      NULL,
+    train_end      DATETIME      NULL,
+    train_rows     BIGINT        NULL,
+    metrics_json   TEXT          NULL,
+    params_json    TEXT          NULL,
+    status         VARCHAR(16)   NOT NULL COMMENT 'ACTIVE/INACTIVE',
+    source_task_id VARCHAR(40)   NULL,
+    engine_endpoint VARCHAR(255) NULL,
+    created_at     DATETIME(3)   NOT NULL,
+    updated_at     DATETIME(3)   NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_model_model_id (model_id),
+    KEY idx_model_type_status (task_type, status, created_at)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='模型注册表';
+
 -- 预训练数据源元数据：描述不同表结构如何映射为统一的 (series_key, ts, fields...) 时序数据
 CREATE TABLE IF NOT EXISTS forecast_data_source
 (

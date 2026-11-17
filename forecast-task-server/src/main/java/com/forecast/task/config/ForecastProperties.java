@@ -23,7 +23,9 @@ public class ForecastProperties {
     /** 当前节点标识，为空时自动使用 主机名:端口 */
     private String nodeId;
 
+    private Executor executor = new Executor();
     private Engine engine = new Engine();
+    private Transfer transfer = new Transfer();
     private Cache cache = new Cache();
     private Task task = new Task();
     private Demo demo = new Demo();
@@ -36,6 +38,19 @@ public class ForecastProperties {
      * 新增预测流程时只需新增 ForecastStep 实现并在此编排，无需改动调度/执行代码。
      */
     private Map<String, Map<String, List<String>>> pipelines = new LinkedHashMap<>();
+
+    @Data
+    public static class Executor {
+        /** 预测任务执行线程池 */
+        private int corePoolSize = 8;
+        private int maxPoolSize = 16;
+        private int queueCapacity = 200;
+        private int keepAliveSeconds = 60;
+        /** 停机时等待运行中任务完成的最长时间 */
+        private int awaitTerminationSeconds = 60;
+        /** 数据分片并行上传线程池 */
+        private int transferPoolSize = 8;
+    }
 
     @Data
     public static class Engine {
@@ -62,6 +77,16 @@ public class ForecastProperties {
         private float circuitFailureRateThreshold = 50f;
         private int circuitSlidingWindowSize = 20;
         private Duration circuitOpenWait = Duration.ofSeconds(30);
+    }
+
+    @Data
+    public static class Transfer {
+        /** 单个分片最大行数 */
+        private int chunkRows = 20000;
+        /** 并行上传的分片数 */
+        private int parallelism = 2;
+        /** 是否 gzip 压缩 */
+        private boolean gzip = true;
     }
 
     @Data

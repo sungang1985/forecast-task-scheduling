@@ -78,6 +78,11 @@ management:
 
 # ========================= 业务配置 =========================
 forecast:
+  executor:
+    core-pool-size: 8
+    max-pool-size: 16
+    queue-capacity: 200
+    transfer-pool-size: 8
   engine:
     # 直连地址（优先）；留空则通过注册中心按 service-id 选择实例
     base-url: ${ENGINE_BASE_URL:}
@@ -92,6 +97,10 @@ forecast:
     retry-initial-interval: 500ms
     cleanup-datasets: true
     result-page-size: 5000
+  transfer:
+    chunk-rows: 20000
+    parallelism: 2
+    gzip: true
   cache:
     enabled: true
     local-max-rows: 5000000
@@ -106,3 +115,53 @@ forecast:
     stale-timeout: 5m
     step-max-attempts: 2
     step-retry-backoff: 3s
+
+  # 流程编排：模式 -> 有序步骤。新增流程时新增 ForecastStep 实现并在此引用
+  pipelines:
+    standard:
+      PREPROCESS: [LOAD_DATA, PREPROCESS]
+      TRAIN: [LOAD_DATA, PREPROCESS, TRAIN]
+      PREDICT: [LOAD_DATA, PREDICT, PERSIST_RESULT]
+      FULL: [LOAD_DATA, PREPROCESS, TRAIN, PREDICT, PERSIST_RESULT]
+
+  # 预测任务类型：数据源（不同表结构）、目标字段、默认窗口与算法
+  task-types:
+    LOAD:
+      display-name: 负荷预测
+      primary-source: load_curve_96
+      exogenous-sources:
+        - source: weather_hourly
+          join-on-key: true
+          cover-forecast-window: true
+      target-fields: [load]
+      frequency: 15min
+      default-algorithm: gbrt
+      default-history-days: 90
+      predict-lookback-days: 14
+      default-horizon-hours: 24
+      timeout: 1h
+      pipeline: standard
+      params:
+        lags: [96, 672]
+        outlier_method: iqr
+    PRICE:
+      display-name: 量价预测
+      primary-source: market_price_da
+      exogenous-sources:
+        - source: load_curve_96
+          join-on-key: false
+          cover-forecast-window: false
+        - source: weather_hourly
+          join-on-key: false
+          cover-forecast-window: true
+      target-fields: [price, volume]
+      frequency: 15min
+      default-algorithm: gbrt
+      default-history-days: 90
+      predict-lookback-days: 14
+      default-horizon-hours: 24
+      timeout: 1h
+      pipeline: standard
+      params:
+        lags: [96, 672]
+        outlier_method: quantile
