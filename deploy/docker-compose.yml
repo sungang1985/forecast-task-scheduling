@@ -1,0 +1,114 @@
+# 一键部署：MySQL + Redis + Nacos + Python 引擎 + 预测任务服务 + 网关 + Prometheus
+# 使用：
+#   mvn -DskipTests package            # 仓库根目录先打包 Java 服务
+#   cd deploy && docker compose up -d --build
+# 访问：网关 http://localhost:9000 ，服务 http://localhost:8080 ，Nacos 控制台 http://localhost:18080 ，Prometheus http://localhost:9090
+name: forecast
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123}
+      MYSQL_DATABASE: forecast
+      MYSQL_USER: forecast
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-forecast}
+      TZ: Asia/Shanghai
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports: ["3306:3306"]
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root123}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7.4
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "2gb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  nacos:
+    # 与 Spring Cloud Alibaba 2025.0 内置的 nacos-client 3.x 保持同一大版本
+    image: nacos/nacos-server:v3.0.3
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_ENABLE: "false"
+      # Nacos 3 启动必填（即使关闭鉴权）；生产环境请替换为自己的随机值（Base64，≥32 字节）
+      NACOS_AUTH_TOKEN: ${NACOS_AUTH_TOKEN:-Zm9yZWNhc3QtdGFzay1zY2hlZHVsaW5nLW5hY29zLWF1dGgtdG9rZW4tMjAyNg==}
+      NACOS_AUTH_IDENTITY_KEY: serverIdentity
+      NACOS_AUTH_IDENTITY_VALUE: forecast
+      JVM_XMS: 512m
+      JVM_XMX: 512m
+    # 8848 服务端口、9848 gRPC 端口、8080 控制台（映射到宿主机 18080）
+    ports: ["8848:8848", "9848:9848", "18080:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/v3/console/health/readiness || exit 1"]
+      interval: 10s
+      retries: 30
+
+  python-engine:
+    build: ../forecast-python-engine
+    image: forecast/python-engine:1.0.0
+    environment:
+      ENGINE_WORKERS: 4
+      ENGINE_DATA_DIR: /data
+      # 注册到 Nacos，Java 侧按服务名发现；多副本时须挂载共享存储到 /data
+      NACOS_ADDR: nacos:8848
+      ENGINE_ADVERTISE_IP: python-engine
+    volumes: [engine-data:/data]
+    ports: ["8000:8000"]
+    depends_on:
+      nacos: { condition: service_healthy }
+
+  task-server:
+    build: ../forecast-task-server
+    image: forecast/task-server:1.0.0
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      MYSQL_HOST: mysql
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-forecast}
+      REDIS_HOST: redis
+      NACOS_ENABLED: "true"
+      NACOS_ADDR: nacos:8848
+      # 引擎通过 Nacos 发现；不使用注册中心时改为设置 ENGINE_BASE_URL: http://python-engine:8000
+      API_KEY_ENABLED: "false"
+      # 演示：加载演示表与演示数据（生产环境去掉这两项）
+      SPRING_FLYWAY_LOCATIONS: classpath:db/migration,classpath:db/demo
+      FORECAST_DEMO_ENABLED: "true"
+      FORECAST_CALLBACK_ALLOWED_HOSTS: localhost
+    ports: ["8080:8080"]
+    volumes: [server-logs:/app/logs]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      python-engine: { condition: service_started }
+
+  gateway:
+    build: ../forecast-gateway
+    image: forecast/gateway:1.0.0
+    environment:
+      SPRING_PROFILES_ACTIVE: nacos
+      NACOS_ENABLED: "true"
+      NACOS_ADDR: nacos:8848
+    ports: ["9000:9000"]
+    depends_on:
+      nacos: { condition: service_healthy }
+      task-server: { condition: service_started }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro", "./alert-rules.yml:/etc/prometheus/alert-rules.yml:ro"]
+    ports: ["9090:9090"]
+    depends_on: [task-server]
+
+volumes:
+  mysql-data:
+  engine-data:
+  server-logs:

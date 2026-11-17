@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  - job_name: forecast-task-server
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["task-server:8080"]
+  - job_name: forecast-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:9000"]
