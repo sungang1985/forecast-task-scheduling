@@ -20,6 +20,19 @@ spring:
       write-dates-as-timestamps: false
     deserialization:
       fail-on-unknown-properties: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-fetch-size: 500
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_id
 
 management:
   endpoints:
@@ -35,7 +48,7 @@ management:
         liveness:
           include: livenessState
         readiness:
-          include: readinessState
+          include: readinessState,db
   metrics:
     tags:
       application: ${spring.application.name}
