@@ -47,7 +47,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,loggers,threaddump,retries,circuitbreakers
+        include: health,info,metrics,prometheus,loggers,threaddump,retries,circuitbreakers
   endpoint:
     health:
       show-details: always
@@ -75,6 +75,12 @@ management:
   health:
     redis:
       enabled: ${forecast.cache.redis-enabled}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
 
 
 # ========================= 业务配置 =========================
@@ -121,6 +127,9 @@ forecast:
     stale-timeout: 5m
     step-max-attempts: 2
     step-retry-backoff: 3s
+  security:
+    enabled: ${API_KEY_ENABLED:false}
+    api-keys: ${API_KEYS:}
   callback:
     allowed-hosts: []
     max-attempts: 3

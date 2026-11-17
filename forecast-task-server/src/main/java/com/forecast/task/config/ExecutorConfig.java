@@ -19,6 +19,7 @@ public class ExecutorConfig {
 
     public static final String TASK_EXECUTOR = "forecastTaskExecutor";
     public static final String TRANSFER_EXECUTOR = "dataTransferExecutor";
+    public static final String CALLBACK_EXECUTOR = "callbackExecutor";
     public static final String JOB_SCHEDULER = "forecastJobTaskScheduler";
 
     /**
@@ -53,6 +54,19 @@ public class ExecutorConfig {
         executor.setMaxPoolSize(size);
         executor.setQueueCapacity(size * 4);
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setTaskDecorator(mdcTaskDecorator());
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean(name = CALLBACK_EXECUTOR)
+    public ThreadPoolTaskExecutor callbackExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setThreadNamePrefix("task-callback-");
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(1000);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardOldestPolicy());
         executor.setTaskDecorator(mdcTaskDecorator());
         executor.initialize();
         return executor;

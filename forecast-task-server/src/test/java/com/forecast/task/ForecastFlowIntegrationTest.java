@@ -167,6 +167,30 @@ class ForecastFlowIntegrationTest {
     }
 
     @Test
+    void callbackIsPostedWhenTaskFinishes() throws Exception {
+        java.util.concurrent.BlockingQueue<String> received = new java.util.concurrent.LinkedBlockingQueue<>();
+        com.sun.net.httpserver.HttpServer receiver = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        receiver.createContext("/callback", ex -> {
+            received.add(new String(ex.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, -1);
+            ex.close();
+        });
+        receiver.start();
+        try {
+            String url = "http://127.0.0.1:" + receiver.getAddress().getPort() + "/callback";
+            Map<String, Object> body = new java.util.HashMap<>(loadRequest("it-callback-1"));
+            body.put("callbackUrl", url);
+            String taskId = post("/api/v1/forecast/LOAD/preprocess", body).get("data").get("taskId").asText();
+
+            String payload = received.poll(30, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(payload).isNotNull().contains(taskId).contains("\"status\":\"SUCCESS\"");
+        } finally {
+            receiver.stop(0);
+        }
+    }
+
+    @Test
     void scheduledFireIsDeduplicatedAndResultWrittenBack() {
         JobConfig job = jobConfigService.listAll().stream()
                 .filter(j -> "LOAD_DAY_AHEAD".equals(j.getJobCode())).findFirst().orElseThrow();

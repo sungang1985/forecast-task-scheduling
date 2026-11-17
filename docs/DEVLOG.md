@@ -5,9 +5,9 @@
 
 ## 进度总览
 
-**当前进度：12 / 15 天（80%）**
+**当前进度：13 / 15 天（87%）**
 
-`████████████░░░`
+`█████████████░░`
 
 | 天 | 阶段 | 主题 | 状态 | 当天新增文件 | 当天新增代码行 | 累计代码行 | 自动化测试（累计通过） |
 |---|---|---|---|---|---|---|---|
@@ -23,7 +23,7 @@
 | [D10](#day-10) | 三、编排与调度 | 分批传输与内置步骤 | ✅ 完成 | 18 | +1546 | 8941 | Java 15 + Python 8 |
 | [D11](#day-11) | 三、编排与调度 | 任务提交与对外接口 | ✅ 完成 | 12 | +1497 | 10438 | Java 23 + Python 8 |
 | [D12](#day-12) | 三、编排与调度 | 定时调度 | ✅ 完成 | 10 | +1133 | 11571 | Java 27 + Python 8 |
-| D13 | 四、可观测与交付 | 监控、可靠性与安全 | ⬜ 未开始 | – | – | – | – |
+| [D13](#day-13) | 四、可观测与交付 | 监控、可靠性与安全 | ✅ 完成 | 6 | +519 / −1 | 12089 | Java 28 + Python 8 |
 | D14 | 四、可观测与交付 | 微服务化 | ⬜ 未开始 | – | – | – | – |
 | D15 | 四、可观测与交付 | 部署与交付 | ⬜ 未开始 | – | – | – | – |
 
@@ -563,3 +563,58 @@
 - 调度器状态接口返回的 `nextFireTime` 是服务器本地时区的时间（本机为 UTC，显示 `22:00`，即上海时间次日 06:00），与日志里带时区的写法不一致，容易看错；功能无误，记录待改进。
 - 到点自动触发、错过补偿、失败重试这三条路径需要等待真实时间流逝，今天没有验证；自动化测试覆盖的是去重与回写。
 - 明天做监控、可靠性与安全。
+
+<a id="day-13"></a>
+### Day 13 · 监控、可靠性与安全
+
+**目标**：让平台“看得见、扛得住、守得住”——有业务指标和总览，节点宕机后任务不会永远卡在运行中，接口有基本的访问控制。
+
+**完成内容**
+
+| 交付物 | 说明 |
+|---|---|
+| 依赖 | Prometheus 指标注册表、springdoc（接口文档） |
+| `TaskMetrics` | 监听任务事件产生业务指标：`forecast_task_submitted_total`、`forecast_task_finished_total{status}`，以及本节点运行 / 排队任务数 |
+| `CallbackNotifier` | 任务结束后向请求里的 `callbackUrl` POST 任务详情，失败按退避重试，结果写入 `callback_status` |
+| `TaskMaintenanceJobs` | 后台作业：定期刷新本节点活动任务的心跳；感知其他节点发起的取消；回收心跳超时的僵尸任务；节点重启时回收自己遗留的任务 |
+| `MonitorController` | `GET /api/v1/monitor/overview`：各状态任务数、本节点运行情况、引擎健康、缓存命中、调度状态、近期失败 |
+| `ApiKeyAuthFilter` | API Key 鉴权（`forecast.security.enabled=true` 时生效），常量时间比较；探活、指标抓取、接口文档免鉴权 |
+| `OpenApiConfig` | 接口文档 `/swagger-ui.html`，声明 `X-API-Key` 安全方案 |
+| `ExecutorConfig` | 新增独立的回调线程池，回调慢不会占用任务线程 |
+| 配置 | Actuator 暴露 `prometheus`；`forecast.security`、springdoc 路径 |
+| 测试 | 集成测试新增 `callbackIsPostedWhenTaskFinishes` |
+
+**关键设计**
+
+- **心跳 + 回收解决节点宕机**。活动任务每 30 秒刷新心跳；任何节点发现心跳超过 5 分钟没更新的任务，就把它置为 FAILED 并发布结束事件（定时任务据此触发重试）。这样即使执行节点被强杀，任务也会在有限时间内收敛到终态。
+- **跨节点取消**。取消请求可能打到不是执行该任务的节点上，所以取消只是写库；执行节点每隔几秒查询“我正在跑的任务里哪些被请求取消了”，再在本地中止。
+- **监控靠监听事件接入**。指标、回调都是 `TaskEvent` 的监听者，今天新增这些能力没有改动执行链路的任何一行。
+- **回调防 SSRF**。只允许回调白名单里的主机（D11 提交时已校验），默认白名单为空，即不允许任何回调。
+- **最小暴露**。免鉴权的只有健康检查、info、Prometheus 抓取和接口文档；`loggers`、`threaddump` 等运维端点同样需要 API Key。
+
+**验证**
+
+- `mvn verify`：构建成功，**Java 28 个测试全部通过**。新增的集成测试起一个本地 HTTP 接收端，提交带 `callbackUrl` 的任务，断言收到了包含 `taskId` 与 `"status":"SUCCESS"` 的回调。
+- **真实引擎联调**（开启 `API_KEY_ENABLED=true`）：
+
+| 检查项 | 结果 |
+|---|---|
+| 不带 Key 访问 `/api/v1/tasks` | HTTP 401，`{"code":10401,"message":"缺少或错误的 X-API-Key"}` |
+| 带错误的 Key | HTTP 401 |
+| 不带 Key 访问 `/actuator/health` | HTTP 200 |
+| 取消一个已成功的任务 | 业务码 `20409`，“任务已结束，状态: SUCCESS” |
+| 重试该任务 | 生成新任务，`triggerType=RETRY`、`parentTaskId` 指向原任务、`retryCount=1`，最终 SUCCESS |
+| 订阅新任务的 SSE | 依次收到 `snapshot`、多条 `step_progress`（传输进度 4% → 18%）、`step_finished`、`step_started`… |
+| 提交量价任务后立即取消 | 任务最终 CANCELLED，步骤轨迹为 `LOAD_DATA: SUCCESS`、`PREPROCESS: CANCELLED`；指标里引擎的 `cancel_task` 被调用 1 次 |
+| `GET /api/v1/monitor/overview` | 成功 2、取消 1；已注册定时任务 2 个；缓存 20 个分段、命中率 28.6% |
+| `GET /actuator/prometheus` | 可见 `forecast_task_submitted_total`、`forecast_task_finished_total`、`forecast_task_seconds_count`、`forecast_task_step_seconds_count`、`forecast_engine_calls_seconds_count`、`forecast_transfer_bytes_total`（471550）、`forecast_transfer_chunks_total`（8）等 |
+| `GET /v3/api-docs` | 标题“预测任务服务 API”，共 31 个路径 |
+
+- 服务日志无 ERROR。D11 留下的“取消、重试、SSE 没有验证”的缺口，今天通过手工联调补上了。
+
+**遗留与明日计划**
+
+- 联调中 `monitor/overview` 有一次把引擎显示为 DOWN（`The target server failed to respond`），而引擎当时在正常处理任务。只出现了一次，未进一步定位，推测是复用了已被对端关闭的空闲连接；业务调用有重试所以没受影响，健康探测没有重试。记录待查。
+- 鉴权失败的 401 响应里 `traceId` 为空，其他错误响应都有，体验不一致，待改进。
+- 僵尸任务回收需要等待 5 分钟心跳超时，今天没有实测。
+- 明天做微服务化：配置中心、网关、声明式客户端。

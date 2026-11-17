@@ -29,6 +29,7 @@ public class ForecastProperties {
     private Cache cache = new Cache();
     private Scheduler scheduler = new Scheduler();
     private Task task = new Task();
+    private Security security = new Security();
     private Callback callback = new Callback();
     private Demo demo = new Demo();
 
@@ -136,6 +137,17 @@ public class ForecastProperties {
         private Duration stepRetryBackoff = Duration.ofSeconds(3);
         /** 取消检测间隔 */
         private Duration cancelCheckInterval = Duration.ofSeconds(3);
+    }
+
+    @Data
+    public static class Security {
+        /** 是否开启 API Key 鉴权 */
+        private boolean enabled = false;
+        private List<String> apiKeys = new ArrayList<>();
+        /** 免鉴权路径：仅开放探活与指标抓取；loggers/threaddump 等运维端点同样需要鉴权 */
+        private List<String> excludePaths = new ArrayList<>(List.of(
+                "/actuator/health", "/actuator/health/**", "/actuator/info", "/actuator/prometheus",
+                "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html", "/error"));
     }
 
     @Data
