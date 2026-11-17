@@ -33,6 +33,17 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         namespace: ${NACOS_NAMESPACE:}
         group: ${NACOS_GROUP:DEFAULT_GROUP}
+      config:
+        enabled: ${NACOS_ENABLED:false}
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        file-extension: yaml
+        import-check:
+          enabled: false
+  config:
+    # 接入 Nacos 配置中心时生效（NACOS_ENABLED=true），配置变更热刷新
+    import: optional:nacos:${spring.application.name}.yaml?refreshEnabled=true
 
 mybatis-plus:
   configuration:

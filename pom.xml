@@ -22,6 +22,7 @@
         <module>forecast-common</module>
         <module>forecast-api</module>
         <module>forecast-task-server</module>
+        <module>forecast-gateway</module>
     </modules>
 
     <properties>

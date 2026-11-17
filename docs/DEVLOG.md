@@ -5,9 +5,9 @@
 
 ## 进度总览
 
-**当前进度：13 / 15 天（87%）**
+**当前进度：14 / 15 天（93%）**
 
-`█████████████░░`
+`██████████████░`
 
 | 天 | 阶段 | 主题 | 状态 | 当天新增文件 | 当天新增代码行 | 累计代码行 | 自动化测试（累计通过） |
 |---|---|---|---|---|---|---|---|
@@ -24,7 +24,7 @@
 | [D11](#day-11) | 三、编排与调度 | 任务提交与对外接口 | ✅ 完成 | 12 | +1497 | 10438 | Java 23 + Python 8 |
 | [D12](#day-12) | 三、编排与调度 | 定时调度 | ✅ 完成 | 10 | +1133 | 11571 | Java 27 + Python 8 |
 | [D13](#day-13) | 四、可观测与交付 | 监控、可靠性与安全 | ✅ 完成 | 6 | +519 / −1 | 12089 | Java 28 + Python 8 |
-| D14 | 四、可观测与交付 | 微服务化 | ⬜ 未开始 | – | – | – | – |
+| [D14](#day-14) | 四、可观测与交付 | 微服务化 | ✅ 完成 | 10 | +1072 | 13161 | Java 43 + Python 8 |
 | D15 | 四、可观测与交付 | 部署与交付 | ⬜ 未开始 | – | – | – | – |
 
 说明：代码行统计不含 `docs/` 下的计划与日志；“自动化测试”为当天构建实际运行并通过的用例数（Java 为 Maven Surefire，Python 为 pytest）。
@@ -618,3 +618,60 @@
 - 鉴权失败的 401 响应里 `traceId` 为空，其他错误响应都有，体验不一致，待改进。
 - 僵尸任务回收需要等待 5 分钟心跳超时，今天没有实测。
 - 明天做微服务化：配置中心、网关、声明式客户端。
+
+<a id="day-14"></a>
+### Day 14 · 微服务化
+
+**目标**：让平台融入微服务体系——有统一入口，配置可集中管理和热刷新，其他服务可以像调本地方法一样调用它。
+
+**完成内容**
+
+| 交付物 | 说明 |
+|---|---|
+| `forecast-gateway` 模块 | Spring Cloud Gateway（WebFlux）+ LoadBalancer + Resilience4j + Nacos 发现 + Actuator / Prometheus / Tracing |
+| 网关路由 | `/api/v1/**` → `lb://forecast-task-server`，带熔断（超时 330 秒，覆盖同步等待接口）与仅针对 GET 的重试；另有一条路由透传下游接口文档 |
+| `ApiKeyGlobalFilter` / `GatewaySecurityProperties` | 网关统一 API Key 鉴权（`gateway.security.enabled=true` 时生效） |
+| `AccessLogGlobalFilter` | 访问日志：为每个请求生成 `X-Request-Id` 并透传下游，记录路由、状态码、耗时 |
+| 网关 `standalone` profile | 不接注册中心时用静态实例声明下游地址 |
+| Nacos 配置中心 | task-server 引入 `nacos-config`，`spring.config.import: optional:nacos:…?refreshEnabled=true`，默认关闭 |
+| `ForecastTaskClient` | 声明式 HTTP 客户端（Spring 6 HTTP Interface）：提交、查询任务、取消、查询结果 |
+| `ForecastTaskClients` | 客户端工厂，定义了统一的返回与异常约定（见下） |
+| `ForecastClientException` | 非约定错误响应时抛出，携带 HTTP 状态码、请求地址、响应体片段 |
+| 测试 | `ForecastTaskClientsTest`（14 个）；集成测试新增 `declarativeClientSubmitsQueriesAndDecodesBusinessErrors` |
+
+客户端的返回与异常约定：
+
+| 情况 | 结果 |
+|---|---|
+| 调用成功 | 返回 `code == 0` 的 `R` |
+| 服务端业务错误（JSON 响应体是统一结构 `R`，无论 4xx 还是 5xx） | **不抛异常**，返回 `code != 0` 的 `R` |
+| 其他错误响应（网关错误页、Spring Boot 默认错误 JSON、空响应体、非 JSON） | 抛 `ForecastClientException` |
+| 网络异常、注册中心无可用实例 | 抛 Spring 的 `ResourceAccessException` |
+
+**关键设计**
+
+- **业务错误不是异常**。“任务不存在”“队列已满”是调用方需要处理的正常分支，以 `R` 返回比让调用方到处 try-catch 更自然；真正的调用失败才抛异常。实现上用一个拦截器先缓存响应体，识别出业务错误后把状态码改写为 200 再交给解码器，原始状态码保留在响应头 `X-Forecast-Original-Status` 里。
+- **提供 `isServerError(R)`**。业务错误不抛异常意味着熔断器默认不会把它算作失败；需要时可用这个方法判断 5xx 类业务错误并计入熔断。
+- **客户端不依赖 Feign**。基于 Spring 自带的 HTTP Interface + `RestClient`，`forecast-api` 对 `spring-web` 只是可选依赖，调用方不会被带入额外的框架。
+- **网关和服务各有一层鉴权**。经网关访问时由网关统一校验；服务被直连时由 D13 的过滤器兜底。两层可以独立开关。
+- **只对 GET 重试**。提交类请求在网关层不重试，避免把一次提交变成多次（虽然有 `requestId` 幂等，但调用方不一定都带）。
+
+**验证**
+
+- `mvn verify`：**4 个模块全部构建成功，Java 43 个测试全部通过**。客户端的 14 个单测覆盖：请求路径与参数、API Key 头、业务错误（4xx / 5xx）以 `R` 返回、各类非约定错误抛 `ForecastClientException`、读取中断与无可用实例映射为 `ResourceAccessException`、调用方自带错误处理器时的行为、观测指标中的状态码、`isServerError`。集成测试用真实服务验证客户端的提交、查询、结果分页与业务错误解码。
+- **网关联调**（网关 19000 → task-server 18080，网关开启 API Key）：
+
+| 检查项 | 结果 |
+|---|---|
+| 网关健康检查 | UP |
+| 经网关访问、不带 Key | HTTP 401，`{"code":10401,"message":"缺少或错误的 X-API-Key"}` |
+| 经网关访问、带 Key | HTTP 200，响应头含 `X-Request-Id`（网关生成）与 `X-Trace-Id`（服务生成） |
+| 经网关查询不存在的任务 | HTTP 404，业务码 `20404` 原样透传 |
+| 网关访问日志 | 记录了路由 `forecast-task-server`、状态码与耗时 |
+
+**遗留与明日计划**
+
+- 补上了 dev 环境的回调主机白名单（`localhost`、`127.0.0.1`），这是 D11 加回调校验时漏配的。
+- **Nacos 没有实测**。本机没有 Nacos，注册发现与配置热刷新只验证了“关闭时不影响启动”，开启后的行为未验证。
+- 网关的熔断与重试路由配置未做故障注入验证。
+- 明天收尾：镜像、Compose、生产配置、文档与全量回归。

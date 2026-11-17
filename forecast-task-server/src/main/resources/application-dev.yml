@@ -28,6 +28,8 @@ forecast:
   demo:
     enabled: true
     history-days: 120
+  callback:
+    allowed-hosts: [localhost, 127.0.0.1]
 
 logging:
   level:

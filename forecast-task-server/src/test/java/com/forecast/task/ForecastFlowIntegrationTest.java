@@ -2,6 +2,14 @@ package com.forecast.task;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.forecast.api.client.ForecastTaskClient;
+import com.forecast.api.client.ForecastTaskClients;
+import com.forecast.api.dto.ForecastPointVO;
+import com.forecast.api.dto.ForecastTaskRequest;
+import com.forecast.api.dto.TaskDetail;
+import com.forecast.api.dto.TaskSubmitResult;
+import com.forecast.common.model.PageResult;
+import com.forecast.common.model.R;
 import com.forecast.common.enums.TriggerType;
 import com.forecast.task.data.cache.SegmentCache;
 import com.forecast.task.domain.entity.JobConfig;
@@ -15,10 +23,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.web.client.RestClient;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -53,6 +63,8 @@ class ForecastFlowIntegrationTest {
 
     @Autowired
     TestRestTemplate rest;
+    @LocalServerPort
+    int port;
     @Autowired
     SegmentCache segmentCache;
     @Autowired
@@ -164,6 +176,33 @@ class ForecastFlowIntegrationTest {
                 Map.of("seriesKeys", List.of("AREA_99")), JsonNode.class);
         assertThat(noModel.getStatusCode().value()).isEqualTo(404);
         assertThat(noModel.getBody().get("code").asInt()).isEqualTo(40404);
+    }
+
+    @Test
+    void declarativeClientSubmitsQueriesAndDecodesBusinessErrors() {
+        ForecastTaskClient client = ForecastTaskClients.create(RestClient.builder(), "http://localhost:" + port);
+
+        ForecastTaskRequest request = new ForecastTaskRequest();
+        request.setRequestId("it-client-1");
+        request.setSeriesKeys(List.of("AREA_01"));
+        request.setHistoryStart(LocalDate.now().minusDays(30).atStartOfDay());
+        request.setHistoryEnd(LocalDate.now().atStartOfDay());
+        R<TaskSubmitResult> submitted = client.submit("load", "full", 60, request);
+        assertThat(submitted.getCode()).isZero();
+        assertThat(submitted.getData().getStatus()).isEqualTo("SUCCESS");
+        String taskId = submitted.getData().getTaskId();
+
+        R<TaskDetail> detail = client.getTask(taskId);
+        assertThat(detail.getData().getSteps()).hasSize(5);
+        R<PageResult<ForecastPointVO>> results = client.getResults(taskId, 1, 50);
+        assertThat(results.getData().getTotal()).isEqualTo(96);
+        assertThat(results.getData().getRecords()).hasSize(50)
+                .allSatisfy(p -> assertThat(p.getForecastTime()).isNotNull());
+
+        // 业务错误（4xx + 统一 JSON 结构）以 R 返回，而不是抛异常
+        assertThat(client.submit("WIND", "full", 0, new ForecastTaskRequest()).getCode()).isEqualTo(20400);
+        assertThat(client.cancel(taskId).getCode()).isEqualTo(20409);
+        assertThat(client.getTask("FT-NOT-EXISTS").getCode()).isEqualTo(20404);
     }
 
     @Test
